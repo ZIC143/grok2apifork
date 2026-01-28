@@ -11,15 +11,22 @@ database_name = "grok2api"
 database_id = "c78b31fb-016a-4e0e-9bd6-3a5bd87137bc"
 migrations_dir = "migrations"
 
-[[r2_buckets]]
-binding = "R2_CACHE"
-bucket_name = "grok2api-cache"
+[[kv_namespaces]]
+binding = "KV_CACHE"
+# Filled by CI / your first deployment bootstrap.
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
 [vars]
-# Auto cleanup settings (Worker cron will enforce)
-R2_CACHE_TTL_DAYS = "7"
-R2_CLEANUP_BATCH = "200"
+# Daily reset at local midnight (default: Asia/Shanghai, UTC+8).
+# Make sure the cron below matches this offset.
+CACHE_RESET_TZ_OFFSET_MINUTES = "480"
+
+# Workers KV has per-value limits; keep <= 25MB.
+KV_CACHE_MAX_BYTES = "26214400"
+
+# Batch size for the daily cleanup job (deleting KV keys + D1 rows).
+KV_CLEANUP_BATCH = "200"
 
 [triggers]
-# Every 6 hours
-crons = ["0 */6 * * *"]
+# Every day at 00:00 (Asia/Shanghai => 16:00 UTC)
+crons = ["0 16 * * *"]

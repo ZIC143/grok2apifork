@@ -33,7 +33,7 @@ import {
   listCacheRowsByType,
   listOldestRows,
   type CacheType,
-} from "../repo/r2Cache";
+} from "../repo/cache";
 
 function jsonError(message: string, code: string): Record<string, unknown> {
   return { error: message, code };
@@ -57,7 +57,7 @@ function formatBytes(sizeBytes: number): string {
   return `${(sizeBytes / mb).toFixed(1)} MB`;
 }
 
-async function clearR2CacheByType(
+async function clearKvCacheByType(
   env: Env,
   type: CacheType | null,
   batch = 200,
@@ -68,7 +68,7 @@ async function clearR2CacheByType(
     const rows = await listOldestRows(env.DB, type, null, batch);
     if (!rows.length) break;
     const keys = rows.map((r) => r.key);
-    await env.R2_CACHE.delete(keys);
+    await Promise.all(keys.map((k) => env.KV_CACHE.delete(k)));
     await deleteCacheRows(env.DB, keys);
     deleted += keys.length;
     if (keys.length < batch) break;
@@ -522,8 +522,8 @@ adminRoutes.get("/api/cache/list", requireAdminAuth, async (c) => {
 
 adminRoutes.post("/api/cache/clear", requireAdminAuth, async (c) => {
   try {
-    const deletedImages = await clearR2CacheByType(c.env, "image");
-    const deletedVideos = await clearR2CacheByType(c.env, "video");
+    const deletedImages = await clearKvCacheByType(c.env, "image");
+    const deletedVideos = await clearKvCacheByType(c.env, "video");
     return c.json({
       success: true,
       message: `缓存清理完成，已删除 ${deletedImages + deletedVideos} 个文件`,
@@ -535,7 +535,7 @@ adminRoutes.post("/api/cache/clear", requireAdminAuth, async (c) => {
 });
 adminRoutes.post("/api/cache/clear/images", requireAdminAuth, async (c) => {
   try {
-    const deleted = await clearR2CacheByType(c.env, "image");
+    const deleted = await clearKvCacheByType(c.env, "image");
     return c.json({ success: true, message: `图片缓存清理完成，已删除 ${deleted} 个文件`, data: { deleted_count: deleted, type: "images" } });
   } catch (e) {
     return c.json(jsonError(`清理失败: ${e instanceof Error ? e.message : String(e)}`, "IMAGE_CACHE_CLEAR_ERROR"), 500);
@@ -543,7 +543,7 @@ adminRoutes.post("/api/cache/clear/images", requireAdminAuth, async (c) => {
 });
 adminRoutes.post("/api/cache/clear/videos", requireAdminAuth, async (c) => {
   try {
-    const deleted = await clearR2CacheByType(c.env, "video");
+    const deleted = await clearKvCacheByType(c.env, "video");
     return c.json({ success: true, message: `视频缓存清理完成，已删除 ${deleted} 个文件`, data: { deleted_count: deleted, type: "videos" } });
   } catch (e) {
     return c.json(jsonError(`清理失败: ${e instanceof Error ? e.message : String(e)}`, "VIDEO_CACHE_CLEAR_ERROR"), 500);

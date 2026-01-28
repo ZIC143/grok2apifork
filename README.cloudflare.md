@@ -1,15 +1,12 @@
-# Grok2API（Cloudflare Workers / Pages：D1 + R2）
+# Grok2API（Cloudflare Workers / Pages：D1 + KV）
 
 这个仓库已经新增 **Cloudflare Workers / Pages** 可部署版本（TypeScript）。
 
 ## 功能概览
 
 - **D1（SQLite）**：持久化 Tokens / API Keys / 管理员会话 / 配置 / 日志
-- **R2**：缓存 `/images/*` 的图片/视频资源（从 `assets.grok.com` 代理抓取）
-- **自动清理**：
-  - **TTL 清理**：按最后访问时间淘汰（默认 7 天）
-  - **容量清理**：按后台配置的 `image_cache_max_size_mb` / `video_cache_max_size_mb` 限制总占用，删除最旧访问的对象
-  - **触发方式**：Workers **Cron Trigger** 定时执行（`wrangler.toml` 已配置）
+- **KV**：缓存 `/images/*` 的图片/视频资源（从 `assets.grok.com` 代理抓取）
+- **每天 0 点统一清除**：通过 KV `expiration` + Workers Cron 定时清理元数据（`wrangler.toml` 已配置，默认按北京时间 00:00）
 
 > 原 Python/FastAPI 版本仍保留用于本地/Docker；Cloudflare 部署请按本文件走 Worker 版本。
 
@@ -57,46 +54,40 @@ npx wrangler d1 migrations apply grok2api --remote
 
 迁移文件在：
 - `migrations/0001_init.sql`
-- `migrations/0002_r2_cache.sql`
+- `migrations/0002_r2_cache.sql`（旧版，已废弃）
+- `migrations/0003_kv_cache.sql`（新版 KV 缓存元数据）
 
 ---
 
-## 3) 创建并绑定 R2（用于图片/视频缓存）
+## 3) 创建并绑定 KV（用于图片/视频缓存）
 
-创建 R2 bucket（名字需与 `wrangler.toml` 一致，默认 `grok2api-cache`）：
+KV Namespace 建议命名为：`grok2api-cache`
+
+如果你使用 GitHub Actions（推荐），工作流会在部署前自动：
+- 创建（或复用）名为 `grok2api-cache` 的 KV namespace
+- 把它的 `id` 写入 CI 运行时的 `wrangler.toml`（不会提交回仓库）
+
+如果你手动部署，可以自己创建 KV namespace 并把 ID 填进 `wrangler.toml`：
 
 ```bash
-npx wrangler r2 bucket create grok2api-cache
+npx wrangler kv namespace create grok2api-cache
 ```
 
-如需改名，同时修改 `wrangler.toml` 的：
-
-- `[[r2_buckets]]`
-  - `binding = "R2_CACHE"`
-  - `bucket_name = "<你的bucket名>"`
+然后把输出的 `id` 填到 `wrangler.toml`：
+- `[[kv_namespaces]]`
+  - `binding = "KV_CACHE"`
+  - `id = "<你的namespace id>"`
 
 ---
 
-## 4) 配置自动清理（Cron + 参数）
+## 4) 配置每天 0 点清理（Cron + 参数）
 
-`wrangler.toml` 已默认配置：
+`wrangler.toml` 已默认配置（按北京时间 00:00）：
 
-- `R2_CACHE_TTL_DAYS = "7"`：对象超过 N 天未访问会被清理
-- `R2_CLEANUP_BATCH = "200"`：每轮清理批量大小（避免超时）
-- `crons = ["0 */6 * * *"]`：每 6 小时运行一次清理
-
-你也可以改成更频繁（例如每小时一次）：
-
-```toml
-[triggers]
-crons = ["0 * * * *"]
-```
-
-容量限制来自后台设置：
-- `image_cache_max_size_mb`
-- `video_cache_max_size_mb`
-
-登录后台后在「设置」里调整即可（无需重新部署）。
+- `CACHE_RESET_TZ_OFFSET_MINUTES = "480"`：时区偏移（分钟），默认 UTC+8
+- `crons = ["0 16 * * *"]`：每天 16:00 UTC（= 北京时间 00:00）触发清理
+- `KV_CACHE_MAX_BYTES = "26214400"`：最大缓存对象大小（KV 单值有大小限制，建议 ≤ 25MB）
+- `KV_CLEANUP_BATCH = "200"`：清理批量（删除 KV key + D1 元数据）
 
 ---
 
@@ -134,7 +125,7 @@ npx wrangler deploy
 
 然后直接 push 到 `main`（或在 Actions 页面手动 Run workflow）即可一键部署。
 
-> 注意：R2 bucket（默认 `grok2api-cache`）需要提前在 Cloudflare 创建；D1 的 `database_id` 已写在 `wrangler.toml`。
+> 注意：此版本不再使用 R2。GitHub Actions 会自动创建/复用 KV namespace（`grok2api-cache`），但你仍需在 GitHub 配好 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`。
 >
 > 另外：`app/template/_worker.js` 是 Pages Advanced Mode 的入口文件。Workers 部署时会被 `app/template/.assetsignore` 排除，避免被当成静态资源上传导致部署失败。
 
@@ -170,7 +161,8 @@ npx wrangler deploy
 
 - `POST /v1/chat/completions`（支持 `stream: true`）
 - `GET /v1/models`
-- `GET /images/<img_path>`：从 R2 读缓存，未命中则抓取 `assets.grok.com` 并写入 R2
+- `GET /images/<img_path>`：从 KV 读缓存，未命中则抓取 `assets.grok.com` 并写入 KV（并在每天 0 点过期/清除）
+- 注意：KV 单条数据有大小限制（建议 ≤ 25MB），且大多数视频播放器会发起 Range 请求；Range 场景会直接代理上游，不一定会命中 KV 缓存。
 - 管理后台 API：`/api/*`（用于管理页）
 
 ---
@@ -188,7 +180,7 @@ npx wrangler pages deploy app/template --project-name <你的Pages项目名> --c
 
 然后在 Pages 项目设置里添加绑定（名称必须匹配代码）：
 - D1：绑定名 `DB`
-- R2：绑定名 `R2_CACHE`
+- KV：绑定名 `KV_CACHE`
 
 注意：
 - **自动清理依赖 Cron Trigger**，目前更推荐用 Workers 部署该项目以保证定时清理稳定运行。

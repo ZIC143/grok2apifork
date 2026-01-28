@@ -3,7 +3,7 @@ import type { Env } from "./env";
 import { openAiRoutes } from "./routes/openai";
 import { mediaRoutes } from "./routes/media";
 import { adminRoutes } from "./routes/admin";
-import { runR2Cleanup } from "./r2/cleanup";
+import { runKvDailyClear } from "./kv/cleanup";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -41,7 +41,7 @@ app.notFound((c) => {
 const handler: ExportedHandler<Env> = {
   fetch: (request, env, ctx) => app.fetch(request, env, ctx),
   scheduled: (_event, env, ctx) => {
-    ctx.waitUntil(runR2Cleanup(env));
+    ctx.waitUntil(runKvDailyClear(env));
   },
 };
 
