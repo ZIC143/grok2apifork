@@ -135,6 +135,8 @@ npx wrangler deploy
 然后直接 push 到 `main`（或在 Actions 页面手动 Run workflow）即可一键部署。
 
 > 注意：R2 bucket（默认 `grok2api-cache`）需要提前在 Cloudflare 创建；D1 的 `database_id` 已写在 `wrangler.toml`。
+>
+> 另外：`app/template/_worker.js` 是 Pages Advanced Mode 的入口文件。Workers 部署时会被 `app/template/.assetsignore` 排除，避免被当成静态资源上传导致部署失败。
 
 ---
 
