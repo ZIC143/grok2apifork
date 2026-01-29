@@ -34,7 +34,7 @@ npx wrangler login
 
 ---
 
-## 2) 创建并绑定 D1
+## 2) 创建并绑定 D1（仅手动部署需要）
 
 创建 D1：
 
@@ -44,7 +44,7 @@ npx wrangler d1 create grok2api
 
 把输出里的 `database_id` 填进 `wrangler.toml`：
 
-- `wrangler.toml` 的 `database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"`
+- `wrangler.toml` 的 `database_id = "REPLACE_WITH_D1_DATABASE_ID"`
 
 应用迁移（会创建所有表）：
 
@@ -59,13 +59,14 @@ npx wrangler d1 migrations apply grok2api --remote
 
 ---
 
-## 3) 创建并绑定 KV（用于图片/视频缓存）
+## 3) 创建并绑定 KV（仅手动部署需要）
 
 KV Namespace 建议命名为：`grok2api-cache`
 
-如果你使用 GitHub Actions（推荐），工作流会在部署前自动：
-- 创建（或复用）名为 `grok2api-cache` 的 KV namespace
-- 把它的 `id` 写入 CI 运行时的 `wrangler.toml`（不会提交回仓库）
+如果你使用 GitHub Actions（推荐），会在部署前自动：
+- 创建（或复用）D1 数据库：`grok2api`
+- 创建（或复用）KV namespace：`grok2api-cache`
+- 自动绑定到 Worker（无需你手动填任何 ID）
 
 如果你手动部署，可以自己创建 KV namespace 并把 ID 填进 `wrangler.toml`：
 
@@ -115,17 +116,18 @@ npx wrangler deploy
 仓库已包含工作流：`.github/workflows/cloudflare-workers.yml`，在 `main` 分支 push 时会自动：
 
 1. `npm ci` + `npm run typecheck`
-2. `wrangler d1 migrations apply grok2api --remote`
-3. `wrangler deploy`
+2. 自动创建/复用 D1 + KV，并生成 `wrangler.ci.toml`
+3. `wrangler d1 migrations apply grok2api --remote`
+4. `wrangler deploy`
 
 你需要在 GitHub 仓库里配置 Secrets（Settings → Secrets and variables → Actions）：
 
 - `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`（建议填写；如果你的 Token 只对应单一账号，有时也可不填）
+- `CLOUDFLARE_ACCOUNT_ID`（必填）
 
-然后直接 push 到 `main`（或在 Actions 页面手动 Run workflow）即可一键部署。
+然后直接 push 到 `main`（或在 Actions 页面手动 Run workflow）即可一键部署（无需你手动创建/填写 D1 或 KV 的 ID）。
 
-> 注意：此版本不再使用 R2。GitHub Actions 会自动创建/复用 KV namespace（`grok2api-cache`），但你仍需在 GitHub 配好 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`。
+> 注意：此版本不再使用 R2。GitHub Actions 会自动创建/复用 D1 与 KV，但你仍需在 GitHub 配好 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`。
 >
 > 另外：`app/template/_worker.js` 是 Pages Advanced Mode 的入口文件。Workers 部署时会被 `app/template/.assetsignore` 排除，避免被当成静态资源上传导致部署失败。
 
