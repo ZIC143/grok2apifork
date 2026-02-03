@@ -73,7 +73,8 @@ app.get("/health", (c) =>
 
 app.notFound((c) => {
   const assets = getAssets(c.env as any);
-  if (!assets) return c.notFound();
+  // Avoid calling c.notFound() here because it will invoke this handler again.
+  if (!assets) return c.text("Not Found", 404);
   return assets.fetch(c.req.raw);
 });
 
