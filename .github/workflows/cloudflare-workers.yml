@@ -119,6 +119,23 @@ jobs:
           print(f"Generated {dst_path}")
           PY
 
+      - name: Verify US placement
+        run: |
+          python - <<'PY'
+          import re
+          text = open("wrangler.ci.toml", "r", encoding="utf-8").read()
+          # We hard-pin placement to US to keep egress locality stable.
+          ok = bool(
+              re.search(
+                  r'(?ms)^\\[placement\\]\\s*$.*?^\\s*region\\s*=\\s*\"aws:us-east-1\"\\s*$',
+                  text,
+              )
+          )
+          if not ok:
+              raise SystemExit('wrangler.ci.toml: missing required [placement] region = \"aws:us-east-1\"')
+          print("OK: placement.region = aws:us-east-1")
+          PY
+
       - name: Apply D1 migrations
         run: npx wrangler d1 migrations apply grok2api --remote --config wrangler.ci.toml
         env:
