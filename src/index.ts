@@ -13,6 +13,11 @@ function getAssets(env: Env): Fetcher | null {
   return assets && typeof assets.fetch === "function" ? (assets as Fetcher) : null;
 }
 
+function getBuildSha(env: Env): string {
+  const v = String((env as any)?.BUILD_SHA ?? "").trim();
+  return v || "dev";
+}
+
 function isDebugRequest(c: any): boolean {
   try {
     return new URL(c.req.url).searchParams.get("debug") === "1";
@@ -21,37 +26,57 @@ function isDebugRequest(c: any): boolean {
   }
 }
 
-function assetFetchError(message: string): Response {
+function withResponseHeaders(res: Response, extra: Record<string, string>): Response {
+  const headers = new Headers(res.headers);
+  for (const [k, v] of Object.entries(extra)) headers.set(k, v);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
+function assetFetchError(message: string, buildSha: string): Response {
   return new Response(message, {
     status: 500,
-    headers: { "content-type": "text/plain; charset=utf-8" },
+    headers: { "content-type": "text/plain; charset=utf-8", "x-grok2api-build": buildSha },
   });
 }
 
 async function fetchAsset(c: any, pathname: string): Promise<Response> {
   const assets = getAssets(c.env as Env);
+  const buildSha = getBuildSha(c.env as Env);
   if (!assets) {
     console.error("ASSETS binding missing: check wrangler.toml assets binding");
     return assetFetchError(
       'Internal Server Error: missing ASSETS binding. Check `wrangler.toml` `assets = { directory = \"./app/template\", binding = \"ASSETS\" }` and redeploy.',
+      buildSha,
     );
   }
 
   const url = new URL(c.req.url);
   url.pathname = pathname;
   try {
-    return await assets.fetch(new Request(url.toString(), c.req.raw));
+    const res = await assets.fetch(new Request(url.toString(), c.req.raw));
+    const extra: Record<string, string> = { "x-grok2api-build": buildSha };
+
+    // Avoid caching HTML aggressively, otherwise users may keep seeing the old panel after redeploy.
+    if (pathname.toLowerCase().endsWith(".html")) {
+      extra["cache-control"] = "no-store, no-cache, must-revalidate";
+      extra["pragma"] = "no-cache";
+      extra["expires"] = "0";
+    }
+
+    return withResponseHeaders(res, extra);
   } catch (err) {
     console.error(`ASSETS fetch failed (${pathname}):`, err);
     const detail = isDebugRequest(c) ? `\n\n${err instanceof Error ? err.stack || err.message : String(err)}` : "";
-    return assetFetchError(`Internal Server Error: failed to fetch asset ${pathname}.${detail}`);
+    return assetFetchError(`Internal Server Error: failed to fetch asset ${pathname}.${detail}`, buildSha);
   }
 }
 
 app.onError((err, c) => {
   console.error("Unhandled error:", err);
+  const buildSha = getBuildSha(c.env as Env);
   const detail = isDebugRequest(c) ? `\n\n${err instanceof Error ? err.stack || err.message : String(err)}` : "";
-  return c.text(`Internal Server Error${detail}`, 500);
+  const res = c.text(`Internal Server Error${detail}`, 500);
+  return withResponseHeaders(res, { "x-grok2api-build": buildSha });
 });
 
 app.route("/v1", openAiRoutes);
@@ -62,9 +87,19 @@ app.get("/_worker.js", (c) => c.notFound());
 
 app.get("/", (c) => c.redirect("/login", 302));
 
-app.get("/login", (c) => fetchAsset(c, "/login.html"));
+app.get("/login", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/login?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/login.html");
+});
 
-app.get("/manage", (c) => fetchAsset(c, "/admin.html"));
+app.get("/manage", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/manage?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/admin.html");
+});
 
 app.get("/static/*", (c) => {
   const url = new URL(c.req.url);
@@ -78,6 +113,7 @@ app.get("/health", (c) =>
     status: "healthy",
     service: "Grok2API",
     runtime: "cloudflare-workers",
+    build: { sha: getBuildSha(c.env as Env) },
     bindings: {
       db: Boolean((c.env as any)?.DB),
       kv_cache: Boolean((c.env as any)?.KV_CACHE),
@@ -86,16 +122,19 @@ app.get("/health", (c) =>
   }),
 );
 
-app.notFound((c) => {
+app.notFound(async (c) => {
   const assets = getAssets(c.env as any);
+  const buildSha = getBuildSha(c.env as Env);
   // Avoid calling c.notFound() here because it will invoke this handler again.
-  if (!assets) return c.text("Not Found", 404);
+  if (!assets) return withResponseHeaders(c.text("Not Found", 404), { "x-grok2api-build": buildSha });
   try {
-    return assets.fetch(c.req.raw);
+    const res = await assets.fetch(c.req.raw);
+    // Keep the header consistent for debugging/version checks.
+    return withResponseHeaders(res, { "x-grok2api-build": buildSha });
   } catch (err) {
     console.error("ASSETS fetch failed (notFound):", err);
     const detail = isDebugRequest(c) ? `\n\n${err instanceof Error ? err.stack || err.message : String(err)}` : "";
-    return c.text(`Internal Server Error${detail}`, 500);
+    return withResponseHeaders(c.text(`Internal Server Error${detail}`, 500), { "x-grok2api-build": buildSha });
   }
 });
 

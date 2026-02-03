@@ -41,6 +41,7 @@ jobs:
           
           token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
           account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+          build_sha = os.environ.get("GITHUB_SHA", "") or ""
           if not token or not account_id:
               raise SystemExit("Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID")
 
@@ -130,6 +131,26 @@ jobs:
           # already contains other values.
           text2 = re.sub(r'REPLACE_WITH_KV_NAMESPACE_ID', kv_id, text2)
           text2 = re.sub(r'REPLACE_WITH_D1_DATABASE_ID', d1_id, text2)
+<<<<<<< HEAD
+=======
+          text2 = re.sub(
+              r'(?ms)(\[\[kv_namespaces\]\].*?^\s*id\s*=\s*")[^"]*("\s*)$',
+              lambda m: f"{m.group(1)}{kv_id}{m.group(2)}",
+              text2,
+          )
+          text2 = re.sub(
+              r'(?ms)(\[\[d1_databases\]\].*?^\s*database_id\s*=\s*")[^"]*("\s*)$',
+              lambda m: f"{m.group(1)}{d1_id}{m.group(2)}",
+              text2,
+          )
+
+          if build_sha:
+              if re.search(r"(?m)^BUILD_SHA\\s*=", text2):
+                  text2 = re.sub(r"(?m)^BUILD_SHA\\s*=\\s*\"[^\"]*\"\\s*$", f'BUILD_SHA = \"{build_sha}\"', text2)
+              else:
+                  # Ensure we expose build info for debugging (e.g. /health).
+                  text2 = re.sub(r"(?m)^\\[vars\\]\\s*$", f'[vars]\\nBUILD_SHA = \"{build_sha}\"', text2, count=1)
+>>>>>>> 0cd3c9d (fix(cf): bust cached UI and expose build)
           open(dst_path, "w", encoding="utf-8").write(text2)
           print(f"KV namespace ready: {kv_title} ({kv_id})")
           print(f"D1 database ready: {d1_name} ({d1_id})")
