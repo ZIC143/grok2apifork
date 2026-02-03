@@ -54,9 +54,8 @@ jobs:
               m = re.search(pattern, wrangler_text)
               return m.group(1).strip() if m and m.group(1).strip() else fallback
 
-          worker_name = extract(r'(?m)^name\\s*=\\s*\"([^\"]+)\"\\s*$', "grok2api")
-          
-            kv_title = f"{worker_name}-cache"
+          worker_name = extract(r'(?m)^name\s*=\s*"([^"]+)"\s*$', "grok2api")
+                    kv_title = f"{worker_name}-cache"
           kv_base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/storage/kv/namespaces"
           print(f"Ensuring KV namespace: {kv_title}", flush=True)
           
@@ -94,7 +93,7 @@ jobs:
               kv_id = res["result"]["id"]
 
           # === Ensure D1 database ===
-            d1_name = extract(r'(?ms)^\[\[d1_databases\]\]\s*$.*?^\s*database_name\s*=\s*"([^"]+)"\s*$', "grok2api")
+          d1_name = extract(r'(?ms)^\[\[d1_databases\]\]\s*$.*?^\s*database_name\s*=\s*"([^"]+)"\s*$', worker_name)
           d1_base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database"
           print(f"Ensuring D1 database: {d1_name}", flush=True)
 
@@ -143,11 +142,11 @@ jobs:
           )
 
           if build_sha:
-              if re.search(r"(?m)^BUILD_SHA\\s*=", text2):
-                  text2 = re.sub(r"(?m)^BUILD_SHA\\s*=\\s*\"[^\"]*\"\\s*$", f'BUILD_SHA = \"{build_sha}\"', text2)
+              if re.search(r'(?m)^BUILD_SHA\s*=', text2):
+                  text2 = re.sub(r'(?m)^BUILD_SHA\s*=\s*"[^"]*"\s*$', f'BUILD_SHA = "{build_sha}"', text2)
               else:
                   # Ensure we expose build info for debugging (e.g. /health).
-                  text2 = re.sub(r"(?m)^\\[vars\\]\\s*$", f'[vars]\\nBUILD_SHA = \"{build_sha}\"', text2, count=1)
+                  text2 = re.sub(r'(?m)^\[vars\]\s*$', f'[vars]\nBUILD_SHA = "{build_sha}"', text2, count=1)
           open(dst_path, "w", encoding="utf-8").write(text2)
           print(f"KV namespace ready: {kv_title} ({kv_id})")
           print(f"D1 database ready: {d1_name} ({d1_id})")
@@ -180,7 +179,11 @@ jobs:
                   f'got directory={assets.get("directory")!r}, binding={assets.get("binding")!r}'
               )
 
-          print("OK: placement.region and assets binding")
+          vars = data.get("vars") or {}
+          build_sha = str(vars.get("BUILD_SHA") or "").strip()
+          if not build_sha or build_sha == "dev":
+              raise SystemExit('wrangler.ci.toml: BUILD_SHA not set (expected CI to inject GITHUB_SHA)')
+          print(f"OK: placement.region and assets binding; BUILD_SHA={build_sha}")
           PY
 
       - name: Apply D1 migrations
