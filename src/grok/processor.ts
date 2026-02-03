@@ -432,7 +432,7 @@ export async function parseOpenAiFromGrokNdjson(
     }
 
     // If upstream emits placeholder/empty generatedImageUrls in intermediate frames, keep scanning.
-    if (Array.isArray(rawUrls) && rawUrls.length > 0) continue;
+    if (Array.isArray(rawUrls)) continue;
 
     // For normal chat replies, the first modelResponse is enough.
     break;
