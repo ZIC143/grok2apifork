@@ -13,6 +13,14 @@ function getAssets(env: Env): Fetcher | null {
   return assets && typeof assets.fetch === "function" ? (assets as Fetcher) : null;
 }
 
+function isDebugRequest(c: any): boolean {
+  try {
+    return new URL(c.req.url).searchParams.get("debug") === "1";
+  } catch {
+    return false;
+  }
+}
+
 function assetFetchError(message: string): Response {
   return new Response(message, {
     status: 500,
@@ -31,12 +39,19 @@ async function fetchAsset(c: any, pathname: string): Promise<Response> {
 
   const url = new URL(c.req.url);
   url.pathname = pathname;
-  return assets.fetch(new Request(url.toString(), c.req.raw));
+  try {
+    return await assets.fetch(new Request(url.toString(), c.req.raw));
+  } catch (err) {
+    console.error(`ASSETS fetch failed (${pathname}):`, err);
+    const detail = isDebugRequest(c) ? `\n\n${err instanceof Error ? err.stack || err.message : String(err)}` : "";
+    return assetFetchError(`Internal Server Error: failed to fetch asset ${pathname}.${detail}`);
+  }
 }
 
 app.onError((err, c) => {
   console.error("Unhandled error:", err);
-  return c.text("Internal Server Error", 500);
+  const detail = isDebugRequest(c) ? `\n\n${err instanceof Error ? err.stack || err.message : String(err)}` : "";
+  return c.text(`Internal Server Error${detail}`, 500);
 });
 
 app.route("/v1", openAiRoutes);
@@ -75,7 +90,13 @@ app.notFound((c) => {
   const assets = getAssets(c.env as any);
   // Avoid calling c.notFound() here because it will invoke this handler again.
   if (!assets) return c.text("Not Found", 404);
-  return assets.fetch(c.req.raw);
+  try {
+    return assets.fetch(c.req.raw);
+  } catch (err) {
+    console.error("ASSETS fetch failed (notFound):", err);
+    const detail = isDebugRequest(c) ? `\n\n${err instanceof Error ? err.stack || err.message : String(err)}` : "";
+    return c.text(`Internal Server Error${detail}`, 500);
+  }
 });
 
 const handler: ExportedHandler<Env> = {
