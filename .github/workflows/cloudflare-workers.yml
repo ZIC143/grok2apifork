@@ -33,7 +33,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          python - <<'PY'
+          python -u - <<'PY'
           import json
           import os
           import re
@@ -43,9 +43,21 @@ jobs:
           account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
           if not token or not account_id:
               raise SystemExit("Missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID")
+
+          src_path = "wrangler.toml"
+          dst_path = "wrangler.ci.toml"
+          print(f"Reading {src_path}...", flush=True)
+          wrangler_text = open(src_path, "r", encoding="utf-8").read()
+
+          def extract(pattern: str, fallback: str) -> str:
+              m = re.search(pattern, wrangler_text)
+              return m.group(1).strip() if m and m.group(1).strip() else fallback
+
+          worker_name = extract(r'(?m)^name\\s*=\\s*\"([^\"]+)\"\\s*$', "grok2api")
           
-          kv_title = "grok2api-cache"
+            kv_title = f"{worker_name}-cache"
           kv_base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/storage/kv/namespaces"
+          print(f"Ensuring KV namespace: {kv_title}", flush=True)
           
           def request(method: str, url: str, data=None):
               headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -58,6 +70,7 @@ jobs:
           kv_id = None
           page = 1
           while True:
+              print(f"KV list page={page}...", flush=True)
               res = request("GET", f"{kv_base}?per_page=100&page={page}")
               if not res.get("success"):
                   raise RuntimeError(res)
@@ -73,18 +86,21 @@ jobs:
               page += 1
           
           if not kv_id:
+              print("KV namespace not found; creating...", flush=True)
               res = request("POST", kv_base, {"title": kv_title})
               if not res.get("success"):
                   raise RuntimeError(res)
               kv_id = res["result"]["id"]
 
           # === Ensure D1 database ===
-          d1_name = "grok2api"
+            d1_name = extract(r'(?ms)^\[\[d1_databases\]\]\s*$.*?^\s*database_name\s*=\s*"([^"]+)"\s*$', "grok2api")
           d1_base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database"
+          print(f"Ensuring D1 database: {d1_name}", flush=True)
 
           d1_id = None
           page = 1
           while True:
+              print(f"D1 list page={page}...", flush=True)
               res = request("GET", f"{d1_base}?per_page=100&page={page}")
               if not res.get("success"):
                   raise RuntimeError(res)
@@ -100,17 +116,18 @@ jobs:
               page += 1
 
           if not d1_id:
+              print("D1 database not found; creating...", flush=True)
               res = request("POST", d1_base, {"name": d1_name})
               if not res.get("success"):
                   raise RuntimeError(res)
               d1_id = res.get("result", {}).get("uuid") or res.get("result", {}).get("id")
               if not d1_id:
                   raise RuntimeError({"error": "Missing D1 database id", "response": res})
-          
-          src_path = "wrangler.toml"
-          dst_path = "wrangler.ci.toml"
-          text = open(src_path, "r", encoding="utf-8").read()
-          text2 = text
+
+          print("Generating wrangler.ci.toml...", flush=True)
+          text2 = wrangler_text
+          # Replace placeholders (default) and also force-set ids in case the template
+          # already contains other values.
           text2 = re.sub(r'REPLACE_WITH_KV_NAMESPACE_ID', kv_id, text2)
           text2 = re.sub(r'REPLACE_WITH_D1_DATABASE_ID', d1_id, text2)
           open(dst_path, "w", encoding="utf-8").write(text2)
@@ -119,32 +136,32 @@ jobs:
           print(f"Generated {dst_path}")
           PY
 
-      - name: Verify US placement
+      - name: Verify wrangler config
         run: |
-          python - <<'PY'
-          import re
-          text = open("wrangler.ci.toml", "r", encoding="utf-8").read()
-          # We hard-pin placement to US to keep egress locality stable.
-          ok = bool(
-              re.search(
-                  r'(?ms)^\\[placement\\]\\s*$.*?^\\s*region\\s*=\\s*\"aws:us-east-1\"\\s*$',
-                  text,
-              )
-          )
-          if not ok:
-            raise SystemExit('wrangler.ci.toml: missing required [placement] region = \"aws:us-east-1\"')
+          python -u - <<'PY'
+          import tomllib
 
-          ok_assets = bool(
-            re.search(
-              r'(?m)^\s*assets\s*=\s*\{\s*directory\s*=\s*"(?:\.\/)?app\/template"\s*,\s*binding\s*=\s*"ASSETS"\s*\}\s*$',
-              text,
-            )
-          )
-          if not ok_assets:
-            raise SystemExit(
-              'wrangler.ci.toml: missing required assets binding. '
-              'Expected directory="./app/template" (or "app/template") and binding="ASSETS"'
-            )
+          with open("wrangler.ci.toml", "rb") as f:
+              data = tomllib.load(f)
+          placement = data.get("placement") or {}
+          region = (placement.get("region") or "").strip()
+          if region != "aws:us-east-1":
+              raise SystemExit(
+                  'wrangler.ci.toml: missing required [placement] region = "aws:us-east-1"'
+              )
+
+          assets = data.get("assets") or {}
+          directory = (assets.get("directory") or "").strip().replace("\\", "/").rstrip("/")
+          while directory.startswith("./"):
+              directory = directory[2:]
+          binding = (assets.get("binding") or "").strip()
+          if directory != "app/template" or binding != "ASSETS":
+              raise SystemExit(
+                  'wrangler.ci.toml: missing required assets binding. '
+                  f'Expected directory="./app/template" (or "app/template") and binding="ASSETS", '
+                  f'got directory={assets.get("directory")!r}, binding={assets.get("binding")!r}'
+              )
+
           print("OK: placement.region and assets binding")
           PY
 
