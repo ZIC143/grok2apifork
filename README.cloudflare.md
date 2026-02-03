@@ -96,8 +96,7 @@ npx wrangler kv namespace create grok2api-cache
 
 部署：
 
-```bash
-npx wrangler deploy
+
 ```
 
 部署后检查：
@@ -186,3 +185,21 @@ npx wrangler pages deploy app/template --project-name <你的Pages项目名> --c
 
 注意：
 - **自动清理依赖 Cron Trigger**，目前更推荐用 Workers 部署该项目以保证定时清理稳定运行。
+<<<<<<< HEAD
+=======
+
+---
+
+## 10) Worker 出站更倾向美区（可选）
+
+本仓库默认在 `wrangler.toml` 将 Workers 的 Placement 固定在美国（Targeted Placement）：
+
+```toml
+[placement]
+region = "aws:us-east-1"
+```
+
+这会让 Worker 的执行位置更稳定地靠近美国区域，从而让出站更偏向美区（对上游在美区的场景更友好）。
+
+如需调整：把 `region` 改成你想要的区域（例如 `aws:us-west-2`）。
+如需关闭：删除 `wrangler.toml` 中的 `[placement]` 段落即可（恢复默认的边缘就近执行）。
