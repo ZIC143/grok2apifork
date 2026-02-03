@@ -130,18 +130,22 @@ jobs:
                   r'(?ms)^\\[placement\\]\\s*$.*?^\\s*region\\s*=\\s*\"aws:us-east-1\"\\s*$',
                   text,
               )
-      )
-      if not ok:
-        raise SystemExit('wrangler.ci.toml: missing required [placement] region = \"aws:us-east-1\"')
-      ok_assets = bool(
-        re.search(
-          r'(?m)^\s*assets\s*=\s*\{\s*directory\s*=\s*"\.\/app\/template"\s*,\s*binding\s*=\s*"ASSETS"\s*\}\s*$',
-          text,
-        )
-      )
-      if not ok_assets:
-        raise SystemExit('wrangler.ci.toml: missing required assets binding for ./app/template -> ASSETS')
-      print("OK: placement.region and assets binding")
+          )
+          if not ok:
+            raise SystemExit('wrangler.ci.toml: missing required [placement] region = \"aws:us-east-1\"')
+
+          ok_assets = bool(
+            re.search(
+              r'(?m)^\s*assets\s*=\s*\{\s*directory\s*=\s*"(?:\.\/)?app\/template"\s*,\s*binding\s*=\s*"ASSETS"\s*\}\s*$',
+              text,
+            )
+          )
+          if not ok_assets:
+            raise SystemExit(
+              'wrangler.ci.toml: missing required assets binding. '
+              'Expected directory="./app/template" (or "app/template") and binding="ASSETS"'
+            )
+          print("OK: placement.region and assets binding")
           PY
 
       - name: Apply D1 migrations
