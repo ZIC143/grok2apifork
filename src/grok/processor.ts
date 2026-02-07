@@ -123,7 +123,11 @@ export function createOpenAiStreamFromGrokNdjson(
     global: GlobalSettings;
     origin: string;
     promptMessages?: Array<{ content?: unknown }>;
-    onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
+    onFinish?: (result: {
+      status: number;
+      duration: number;
+      usage?: ReturnType<typeof buildChatUsageFromTexts>;
+    }) => Promise<void> | void;
   },
 ): ReadableStream<Uint8Array> {
   const { settings, global, origin } = opts;
@@ -419,7 +423,13 @@ export function createOpenAiStreamFromGrokNdjson(
         );
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
-        if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+        if (opts.onFinish) {
+          await opts.onFinish({
+            status: finalStatus,
+            duration: (Date.now() - startTime) / 1000,
+            usage,
+          });
+        }
         controller.close();
       } catch (e) {
         finalStatus = 500;
@@ -429,7 +439,9 @@ export function createOpenAiStreamFromGrokNdjson(
           ),
         );
         controller.enqueue(encoder.encode(makeDone()));
-        if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+        if (opts.onFinish) {
+          await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+        }
         controller.close();
       } finally {
         try {

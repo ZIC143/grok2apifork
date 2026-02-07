@@ -1304,8 +1304,13 @@ openAiRoutes.post("/chat/completions", async (c) => {
             global: settingsBundle.global,
             origin,
             promptMessages,
-            onFinish: async ({ status, duration }) => {
+            onFinish: async ({ status, duration, usage }) => {
               const promptEst = estimateInputTokensFromMessages(promptMessages);
+              const resolved = usage ?? buildChatUsageFromTexts({
+                promptTextTokens: promptEst.textTokens,
+                promptImageTokens: promptEst.imageTokens,
+                completionText: "",
+              });
               await addRequestLog(c.env.DB, {
                 ip,
                 model: requestedModel,
@@ -1313,11 +1318,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
                 status,
                 key_name: keyName,
                 token_suffix: jwt.slice(-6),
-                total_tokens: promptEst.promptTokens,
-                input_tokens: promptEst.promptTokens,
-                output_tokens: 0,
-                reasoning_tokens: 0,
-                cached_tokens: 0,
+                total_tokens: resolved.total_tokens,
+                input_tokens: resolved.input_tokens,
+                output_tokens: resolved.output_tokens,
+                reasoning_tokens: resolved.reasoning_tokens,
+                cached_tokens: resolved.cached_tokens,
                 error: status === 200 ? "" : "stream_error",
               });
             },
