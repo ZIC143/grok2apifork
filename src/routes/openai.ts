@@ -53,6 +53,30 @@ openAiRoutes.use(
   }),
 );
 
+// Admin verification endpoint for frontend (app_key validation)
+openAiRoutes.get("/admin/verify", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader) return c.json({ error: "Missing Authorization header" }, 401);
+  
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  const token = match?.[1]?.trim();
+  if (!token) return c.json({ error: "Invalid Authorization format" }, 401);
+  
+  const settings = await getSettings(c.env);
+  const apiKey = (settings.grok.api_key ?? "").trim();
+  
+  if (!apiKey) {
+    // If no API key is configured, deny access to admin panel
+    return c.json({ error: "Admin access not configured" }, 401);
+  }
+  
+  if (token === apiKey) {
+    return c.json({ success: true }, 200);
+  }
+  
+  return c.json({ error: "Invalid app_key" }, 401);
+});
+
 openAiRoutes.use("/*", requireApiAuth);
 
 openAiRoutes.get("/models", async (c) => {
