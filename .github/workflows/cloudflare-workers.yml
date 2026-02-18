@@ -185,10 +185,10 @@ jobs:
           while directory.startswith("./"):
               directory = directory[2:]
           binding = (assets.get("binding") or "").strip()
-          if directory != "app/template" or binding != "ASSETS":
+            if directory != "app/static" or binding != "ASSETS":
               raise SystemExit(
                   'wrangler.ci.toml: missing required assets binding. '
-                  f'Expected directory="./app/template" (or "app/template") and binding="ASSETS", '
+                f'Expected directory="./app/static" (or "app/static") and binding="ASSETS", '
                   f'got directory={assets.get("directory")!r}, binding={assets.get("binding")!r}'
               )
 

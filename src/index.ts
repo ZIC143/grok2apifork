@@ -91,14 +91,14 @@ app.get("/login", (c) => {
   const buildSha = getBuildSha(c.env as Env);
   const v = c.req.query("v") ?? "";
   if (v !== buildSha) return c.redirect(`/login?v=${encodeURIComponent(buildSha)}`, 302);
-  return fetchAsset(c, "/login.html");
+  return fetchAsset(c, "/public/pages/login.html");
 });
 
 app.get("/manage", (c) => {
   const buildSha = getBuildSha(c.env as Env);
   const v = c.req.query("v") ?? "";
   if (v !== buildSha) return c.redirect(`/manage?v=${encodeURIComponent(buildSha)}`, 302);
-  return fetchAsset(c, "/admin.html");
+  return fetchAsset(c, "/admin/pages/login.html");
 });
 
 app.get("/static/*", (c) => {

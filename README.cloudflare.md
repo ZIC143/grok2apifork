@@ -129,7 +129,7 @@ npx wrangler deploy
 
 > 注意：此版本不再使用 R2。GitHub Actions 会自动创建/复用 D1 与 KV，但你仍需在 GitHub 配好 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`。
 >
-> 另外：`app/template/_worker.js` 是 Pages Advanced Mode 的入口文件。Workers 部署时会被 `app/template/.assetsignore` 排除，避免被当成静态资源上传导致部署失败。
+> 另外：`app/template/_worker.js` 是 Pages Advanced Mode 的入口文件。Workers 当前从 `app/static` 提供静态资源（登录页与管理页）。
 
 ---
 
