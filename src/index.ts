@@ -94,6 +94,27 @@ app.get("/login", (c) => {
   return fetchAsset(c, "/public/pages/login.html");
 });
 
+app.get("/imagine", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/imagine?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/public/pages/imagine.html");
+});
+
+app.get("/video", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/video?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/public/pages/video.html");
+});
+
+app.get("/voice", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/voice?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/public/pages/voice.html");
+});
+
 app.get("/manage", (c) => {
   const buildSha = getBuildSha(c.env as Env);
   const v = c.req.query("v") ?? "";
@@ -106,6 +127,34 @@ app.get("/admin", (c) => {
   const v = c.req.query("v") ?? "";
   if (v !== buildSha) return c.redirect(`/admin?v=${encodeURIComponent(buildSha)}`, 302);
   return fetchAsset(c, "/admin/pages/login.html");
+});
+
+app.get("/admin/login", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/admin/login?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/admin/pages/login.html");
+});
+
+app.get("/admin/token", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/admin/token?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/admin/pages/token.html");
+});
+
+app.get("/admin/config", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/admin/config?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/admin/pages/config.html");
+});
+
+app.get("/admin/cache", (c) => {
+  const buildSha = getBuildSha(c.env as Env);
+  const v = c.req.query("v") ?? "";
+  if (v !== buildSha) return c.redirect(`/admin/cache?v=${encodeURIComponent(buildSha)}`, 302);
+  return fetchAsset(c, "/admin/pages/cache.html");
 });
 
 app.get("/static/*", (c) => {
