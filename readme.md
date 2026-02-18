@@ -2,6 +2,8 @@
 
 **中文** | [English](docs/README.en.md)
 
+Cloudflare Workers / Pages 部署说明请查看：README.cloudflare.md
+
 > [!NOTE]
 > 本项目仅供学习与研究，使用者必须在遵循 Grok 的 **使用条款** 以及 **法律法规** 的情况下使用，不得用于非法用途。
 

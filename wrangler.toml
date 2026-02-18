@@ -1,0 +1,25 @@
+name = "grok2api"
+main = "src/index.ts"
+compatibility_date = "2026-01-28"
+
+# Static assets (admin UI)
+assets = { directory = "./app/template", binding = "ASSETS" }
+
+[[d1_databases]]
+binding = "DB"
+database_name = "grok2api"
+database_id = "c78b31fb-016a-4e0e-9bd6-3a5bd87137bc"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "R2_CACHE"
+bucket_name = "grok2api-cache"
+
+[vars]
+# Auto cleanup settings (Worker cron will enforce)
+R2_CACHE_TTL_DAYS = "7"
+R2_CLEANUP_BATCH = "200"
+
+[triggers]
+# Every 6 hours
+crons = ["0 */6 * * *"]
