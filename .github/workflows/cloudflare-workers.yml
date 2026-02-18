@@ -68,7 +68,7 @@ jobs:
               return m.group(1).strip() if m and m.group(1).strip() else fallback
 
           worker_name = extract(r'(?m)^name\s*=\s*"([^"]+)"\s*$', "grok2api")
-                    kv_title = f"{worker_name}-cache"
+          kv_title = f"{worker_name}-cache"
           kv_base = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/storage/kv/namespaces"
           print(f"Ensuring KV namespace: {kv_title}", flush=True)
           
