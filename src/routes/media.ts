@@ -98,25 +98,22 @@ function toUpstreamHeaders(args: { pathname: string; cookie: string; settings: A
   return headers;
 }
 
-mediaRoutes.get("/images/:imgPath{.+}", async (c) => {
-  const imgPath = c.req.param("imgPath");
-  const originalPath = `/${imgPath.replaceAll("-", "/")}`;
+async function serveAssetByPath(c: any, originalPath: string, cacheKeyName: string): Promise<Response> {
   const url = new URL(`https://assets.grok.com${originalPath}`);
   const type = detectTypeByPath(originalPath);
-  const key = r2Key(type, imgPath);
+  const key = r2Key(type, cacheKeyName);
   const cacheSeconds = guessCacheSeconds(originalPath);
 
   const rangeHeader = c.req.header("Range");
-  const cached = await c.env.KV_CACHE.getWithMetadata<{ contentType?: string; size?: number }>(key, {
+  const cached = (await c.env.KV_CACHE.getWithMetadata(key, {
     type: "arrayBuffer",
-  });
+  })) as { value: ArrayBuffer | null; metadata?: { contentType?: string; size?: number } } | null;
   if (cached?.value) {
     c.executionCtx.waitUntil(touchCacheRow(c.env.DB, key, nowMs()));
     const contentType = (cached.metadata?.contentType as string | undefined) ?? "application/octet-stream";
     return responseFromBytes({ bytes: cached.value, contentType, cacheSeconds, rangeHeader });
   }
 
-  // stale metadata cleanup (best-effort)
   c.executionCtx.waitUntil(deleteCacheRow(c.env.DB, key));
 
   const settingsBundle = await getSettings(c.env);
@@ -128,8 +125,6 @@ mediaRoutes.get("/images/:imgPath{.+}", async (c) => {
 
   const baseHeaders = toUpstreamHeaders({ pathname: originalPath, cookie, settings: settingsBundle.grok });
 
-  // Range requests: KV can't stream partial content efficiently; proxy from upstream.
-  // (If the object is cached and within KV limits, we do support Range by slicing bytes above.)
   const upstream = await fetch(url.toString(), { headers: rangeHeader ? { ...baseHeaders, Range: rangeHeader } : baseHeaders });
   if (!upstream.ok || !upstream.body) {
     const txt = await upstream.text().catch(() => "");
@@ -184,4 +179,24 @@ mediaRoutes.get("/images/:imgPath{.+}", async (c) => {
   outHeaders.set("Cache-Control", `public, max-age=${cacheSeconds}`);
   if (contentType) outHeaders.set("Content-Type", contentType);
   return new Response(upstream.body, { status: upstream.status, headers: outHeaders });
+}
+
+mediaRoutes.get("/images/:imgPath{.+}", async (c) => {
+  const imgPath = c.req.param("imgPath");
+  const originalPath = `/${imgPath.replaceAll("-", "/")}`;
+  return serveAssetByPath(c, originalPath, imgPath);
+});
+
+mediaRoutes.get("/v1/files/image/:name", async (c) => {
+  const name = decodeURIComponent(c.req.param("name") ?? "").trim();
+  if (!name) return c.text("Not Found", 404);
+  const originalPath = `/${name}`;
+  return serveAssetByPath(c, originalPath, name);
+});
+
+mediaRoutes.get("/v1/files/video/:name", async (c) => {
+  const name = decodeURIComponent(c.req.param("name") ?? "").trim();
+  if (!name) return c.text("Not Found", 404);
+  const originalPath = `/${name}`;
+  return serveAssetByPath(c, originalPath, name);
 });

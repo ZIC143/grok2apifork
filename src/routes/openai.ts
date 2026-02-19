@@ -8,6 +8,7 @@ import { extractContent, buildConversationPayload, sendConversationRequest } fro
 import { uploadImage } from "../grok/upload";
 import { createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
+import { getDynamicHeaders } from "../grok/headers";
 import { addRequestLog } from "../repo/logs";
 import {
   addTokens,
@@ -159,6 +160,33 @@ async function buildLegacyCacheStats(env: Env, scope: "all" | "selected" | "none
   const bytes = await getCacheSizeBytes(env.DB);
   const image = await listCacheRowsByType(env.DB, "image", 1, 0);
   const video = await listCacheRowsByType(env.DB, "video", 1, 0);
+  const rows = await listTokens(env.DB);
+  const accounts = onlineAccountRows(rows);
+
+  let onlineCount = 0;
+  let onlineStatus = "not_loaded";
+  let lastClear: number | null = null;
+  const details: Array<Record<string, unknown>> = [];
+
+  for (const r of rows) {
+    const st = onlineAssetState.get(r.token);
+    const clearAt = onlineAssetClearAt.get(r.token) ?? null;
+    const status = st?.status ?? "not_loaded";
+    const count = st?.count ?? 0;
+    onlineCount += count;
+    if (status === "ok") onlineStatus = "ok";
+    if (status.startsWith("error")) onlineStatus = onlineStatus === "ok" ? "ok" : "error";
+    if (typeof clearAt === "number") lastClear = Math.max(lastClear ?? 0, clearAt);
+    details.push({
+      token: r.token,
+      token_masked: maskToken(r.token),
+      count,
+      status,
+      last_asset_clear_at: clearAt,
+    });
+  }
+
+  const selected = token ? onlineAssetState.get(token) : null;
   return {
     local_image: {
       count: image.total,
@@ -169,24 +197,323 @@ async function buildLegacyCacheStats(env: Env, scope: "all" | "selected" | "none
       size_mb: Number((bytes.video / 1024 / 1024).toFixed(2)),
     },
     online: {
-      count: 0,
-      status: "not_loaded",
+      count: token ? selected?.count ?? 0 : onlineCount,
+      status: token ? selected?.status ?? "not_loaded" : onlineStatus,
       token,
-      last_asset_clear_at: null,
+      last_asset_clear_at: token ? onlineAssetClearAt.get(token) ?? null : lastClear,
     },
-    online_accounts: [],
-    online_details: [],
+    online_accounts: accounts,
+    online_details: details,
     online_scope: scope,
   };
 }
 
 const legacyBatchTasks = new Map<string, { kind: string; total: number; result?: Record<string, unknown> }>();
 
+const IMAGINE_SESSION_TTL_MS = 10 * 60 * 1000;
+const VIDEO_SESSION_TTL_MS = 10 * 60 * 1000;
+
+const imagineSessions = new Map<
+  string,
+  {
+    prompt: string;
+    aspect_ratio: string;
+    nsfw: boolean | null;
+    created_at: number;
+  }
+>();
+
+const videoSessions = new Map<
+  string,
+  {
+    prompt: string;
+    aspect_ratio: string;
+    video_length: number;
+    resolution_name: "480p" | "720p";
+    preset: "fun" | "normal" | "spicy" | "custom";
+    image_url: string | null;
+    reasoning_effort: string | null;
+    created_at: number;
+  }
+>();
+
+const onlineAssetClearAt = new Map<string, number>();
+const onlineAssetState = new Map<string, { count: number; status: string }>();
+
 function createLegacyTask(kind: string, total: number, result?: Record<string, unknown>): string {
   const taskId = crypto.randomUUID();
   if (result) legacyBatchTasks.set(taskId, { kind, total: Math.max(0, total), result });
   else legacyBatchTasks.set(taskId, { kind, total: Math.max(0, total) });
   return taskId;
+}
+
+function cleanupSessions<T extends { created_at: number }>(store: Map<string, T>, ttlMs: number): void {
+  const now = Date.now();
+  for (const [taskId, info] of store.entries()) {
+    if (now - info.created_at > ttlMs) store.delete(taskId);
+  }
+}
+
+function getImagineSession(taskId: string): (typeof imagineSessions extends Map<any, infer V> ? V : never) | null {
+  cleanupSessions(imagineSessions, IMAGINE_SESSION_TTL_MS);
+  if (!taskId) return null;
+  const v = imagineSessions.get(taskId);
+  if (!v) return null;
+  return { ...v };
+}
+
+function getVideoSession(taskId: string): (typeof videoSessions extends Map<any, infer V> ? V : never) | null {
+  cleanupSessions(videoSessions, VIDEO_SESSION_TTL_MS);
+  if (!taskId) return null;
+  const v = videoSessions.get(taskId);
+  if (!v) return null;
+  return { ...v };
+}
+
+async function requireLegacyPublic(c: any): Promise<Response | null> {
+  const bearer = parseBearer(c.req.header("Authorization") ?? null);
+  const queryKey = String(c.req.query("public_key") ?? "").trim();
+  const provided = bearer || queryKey;
+  const settings = await getSettings(c.env as Env);
+  const expected = String(settings.grok.api_key ?? "").trim();
+  if (!expected) return null;
+  if (provided && provided === expected) return null;
+  return c.json({ status: "error", detail: "Unauthorized" }, 401);
+}
+
+function resolveImagineRatio(raw: string): string {
+  const v = String(raw || "").trim();
+  const allow = new Set(["16:9", "9:16", "3:2", "2:3", "1:1", "4:3", "3:4"]);
+  return allow.has(v) ? v : "2:3";
+}
+
+function resolveVideoRatio(raw: string): "16:9" | "9:16" | "3:2" | "2:3" | "1:1" {
+  const map: Record<string, "16:9" | "9:16" | "3:2" | "2:3" | "1:1"> = {
+    "16:9": "16:9",
+    "9:16": "9:16",
+    "3:2": "3:2",
+    "2:3": "2:3",
+    "1:1": "1:1",
+    "1280x720": "16:9",
+    "720x1280": "9:16",
+    "1792x1024": "3:2",
+    "1024x1792": "2:3",
+    "1024x1024": "1:1",
+  };
+  return map[String(raw || "").trim()] ?? "3:2";
+}
+
+function maskToken(token: string): string {
+  if (!token) return "";
+  if (token.length <= 10) return `${token.slice(0, 3)}***${token.slice(-2)}`;
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function onlineAccountRows(rows: Awaited<ReturnType<typeof listTokens>>): Array<Record<string, unknown>> {
+  return rows.map((r) => ({
+    token: r.token,
+    token_masked: maskToken(r.token),
+    pool: toPoolName(r.token_type),
+    last_asset_clear_at: onlineAssetClearAt.get(r.token) ?? null,
+  }));
+}
+
+function base64UrlEncode(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function encodeAssetPath(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return `u_${base64UrlEncode(u.toString())}`;
+  } catch {
+    const p = raw.startsWith("/") ? raw : `/${raw}`;
+    return `p_${base64UrlEncode(p)}`;
+  }
+}
+
+function toProxyAssetUrl(raw: string, settings: Awaited<ReturnType<typeof getSettings>>["global"], origin: string): string {
+  const baseUrl = String(settings.base_url ?? "").trim() || origin;
+  const path = encodeAssetPath(raw);
+  return `${baseUrl}/images/${path}`;
+}
+
+async function consumeNdjson(
+  upstream: Response,
+  onObject: (obj: Record<string, any>) => Promise<void> | void,
+): Promise<void> {
+  if (!upstream.body) return;
+  const reader = upstream.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      buffer += decoder.decode(value, { stream: true });
+      let idx = -1;
+      while ((idx = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const data = JSON.parse(line) as Record<string, any>;
+          await onObject(data);
+        } catch {
+          // ignore malformed line
+        }
+      }
+    }
+    const tail = buffer.trim();
+    if (tail) {
+      try {
+        const data = JSON.parse(tail) as Record<string, any>;
+        await onObject(data);
+      } catch {
+        // ignore
+      }
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function listRemoteAssetIds(env: Env, token: string, settings: Awaited<ReturnType<typeof getSettings>>): Promise<string[]> {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let pageToken = "";
+
+  for (let i = 0; i < 100; i++) {
+    const headers = getDynamicHeaders(settings.grok, "/rest/assets");
+    const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
+    headers.Cookie = cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
+
+    const url = new URL("https://grok.com/rest/assets");
+    url.searchParams.set("pageSize", "50");
+    url.searchParams.set("orderBy", "ORDER_BY_LAST_USE_TIME");
+    url.searchParams.set("source", "SOURCE_ANY");
+    url.searchParams.set("isLatest", "true");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const upstream = await fetch(url.toString(), {
+      method: "GET",
+      headers,
+    });
+
+    if (!upstream.ok) {
+      const txt = await upstream.text().catch(() => "");
+      await recordTokenFailure(env.DB, token, upstream.status, txt.slice(0, 200));
+      await applyCooldown(env.DB, token, upstream.status);
+      throw new Error(`assets_list_http_${upstream.status}`);
+    }
+
+    const data = (await upstream.json().catch(() => ({}))) as Record<string, any>;
+    const items = Array.isArray(data.assets) ? data.assets : [];
+    for (const item of items) {
+      const id = String(item?.assetId ?? "").trim();
+      if (id) out.push(id);
+    }
+
+    const next = String(data.nextPageToken ?? "").trim();
+    if (!next || seen.has(next)) break;
+    seen.add(next);
+    pageToken = next;
+  }
+
+  return out;
+}
+
+async function clearRemoteAssets(
+  env: Env,
+  token: string,
+  assetIds: string[],
+  settings: Awaited<ReturnType<typeof getSettings>>,
+): Promise<{ success: number; failed: number }> {
+  let success = 0;
+  let failed = 0;
+  const targets = assetIds.filter(Boolean);
+
+  await mapLimit(targets, 6, async (assetId) => {
+    const headers = getDynamicHeaders(settings.grok, "/rest/assets-metadata");
+    const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
+    headers.Cookie = cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
+
+    const upstream = await fetch(`https://grok.com/rest/assets-metadata/${encodeURIComponent(assetId)}`, {
+      method: "DELETE",
+      headers,
+    });
+
+    if (upstream.ok) {
+      success += 1;
+      return;
+    }
+
+    failed += 1;
+    const txt = await upstream.text().catch(() => "");
+    await recordTokenFailure(env.DB, token, upstream.status, txt.slice(0, 200));
+    await applyCooldown(env.DB, token, upstream.status);
+  });
+
+  if (success > 0) onlineAssetClearAt.set(token, Date.now());
+  return { success, failed };
+}
+
+async function buildOnlineDetails(
+  env: Env,
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  tokens: string[],
+): Promise<{ details: Array<Record<string, unknown>>; total: number }> {
+  let total = 0;
+  const details: Array<Record<string, unknown>> = [];
+
+  for (const token of tokens) {
+    try {
+      const assetIds = await listRemoteAssetIds(env, token, settings);
+      total += assetIds.length;
+      onlineAssetState.set(token, { count: assetIds.length, status: "ok" });
+      details.push({
+        token,
+        token_masked: maskToken(token),
+        count: assetIds.length,
+        status: "ok",
+        last_asset_clear_at: onlineAssetClearAt.get(token) ?? null,
+      });
+    } catch (e) {
+      onlineAssetState.set(token, { count: 0, status: `error: ${e instanceof Error ? e.message : String(e)}` });
+      details.push({
+        token,
+        token_masked: maskToken(token),
+        count: 0,
+        status: `error: ${e instanceof Error ? e.message : String(e)}`,
+        last_asset_clear_at: onlineAssetClearAt.get(token) ?? null,
+      });
+    }
+  }
+
+  return { details, total };
+}
+
+function onlineSummaryFromDetails(details: Array<Record<string, unknown>>): { count: number; status: string; last_asset_clear_at: number | null } {
+  let count = 0;
+  let status = "not_loaded";
+  let last_asset_clear_at: number | null = null;
+  for (const d of details) {
+    count += Number(d.count ?? 0) || 0;
+    const st = String(d.status ?? "not_loaded");
+    if (st === "ok") status = "ok";
+    else if (st.startsWith("error") && status !== "ok") status = "error";
+    const t = Number(d.last_asset_clear_at ?? 0) || 0;
+    if (t > 0) last_asset_clear_at = Math.max(last_asset_clear_at ?? 0, t);
+  }
+  return { count, status, last_asset_clear_at };
 }
 
 export const openAiRoutes = new Hono<{ Bindings: Env; Variables: { apiAuth: ApiAuthInfo } }>();
@@ -232,6 +559,434 @@ openAiRoutes.get("/public/verify", async (c) => {
   if (!required) return c.json({ status: "success" });
   if (bearer && bearer === required) return c.json({ status: "success" });
   return c.json({ status: "error", detail: "Unauthorized" }, 401);
+});
+
+openAiRoutes.get("/public/imagine/config", async (c) => {
+  const settings = await getSettings(c.env);
+  const nsfwDefault = String(settings.grok.filtered_tags ?? "").toLowerCase().includes("nsfw");
+  return c.json({
+    final_min_bytes: 100000,
+    medium_min_bytes: 50000,
+    nsfw: nsfwDefault,
+  });
+});
+
+openAiRoutes.post("/public/imagine/start", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+
+  const body = (await c.req.json()) as { prompt?: string; aspect_ratio?: string; nsfw?: boolean | null };
+  const prompt = String(body?.prompt ?? "").trim();
+  if (!prompt) return c.json({ detail: "Prompt cannot be empty" }, 400);
+
+  const aspect_ratio = resolveImagineRatio(String(body?.aspect_ratio ?? "2:3"));
+  const task_id = crypto.randomUUID().replace(/-/g, "");
+  cleanupSessions(imagineSessions, IMAGINE_SESSION_TTL_MS);
+  imagineSessions.set(task_id, {
+    prompt,
+    aspect_ratio,
+    nsfw: typeof body?.nsfw === "boolean" ? body.nsfw : null,
+    created_at: Date.now(),
+  });
+
+  return c.json({ task_id, aspect_ratio });
+});
+
+openAiRoutes.post("/public/imagine/stop", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+  const body = (await c.req.json()) as { task_ids?: string[] };
+  const taskIds = Array.isArray(body?.task_ids) ? body.task_ids : [];
+  let removed = 0;
+  for (const taskId of taskIds) {
+    if (imagineSessions.delete(String(taskId))) removed += 1;
+  }
+  return c.json({ status: "success", removed });
+});
+
+openAiRoutes.get("/public/imagine/sse", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+
+  const taskId = String(c.req.query("task_id") ?? "").trim();
+  const session = getImagineSession(taskId);
+  if (!session) return c.json({ detail: "Task not found" }, 404);
+
+  const settingsBundle = await getSettings(c.env);
+  const origin = new URL(c.req.url).origin;
+  const chosen = await selectBestToken(c.env.DB, "grok-imagine-0.9");
+  if (!chosen) return c.json({ error: "No available token" }, 503);
+
+  const jwt = chosen.token;
+  const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+  const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
+
+  const { payload, referer } = buildConversationPayload({
+    requestModel: "grok-imagine-0.9",
+    content: session.prompt,
+    imgIds: [],
+    imgUris: [],
+    settings: settingsBundle.grok,
+  });
+
+  (payload as any).enableImageStreaming = true;
+  (payload as any).imageGenerationCount = 6;
+  (payload as any).modelConfigOverride = {
+    modelMap: {
+      imageGenModelConfig: {
+        aspectRatio: session.aspect_ratio,
+        enableNsfw: session.nsfw ?? undefined,
+      },
+    },
+  };
+
+  const upstream = await sendConversationRequest({
+    payload,
+    cookie,
+    settings: settingsBundle.grok,
+    ...(referer ? { referer } : {}),
+  });
+
+  if (!upstream.ok || !upstream.body) {
+    const txt = await upstream.text().catch(() => "");
+    await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
+    await applyCooldown(c.env.DB, jwt, upstream.status);
+    return c.json({ detail: `upstream_${upstream.status}` }, 502);
+  }
+
+  const stream = new ReadableStream<Uint8Array>({
+    start: async (controller) => {
+      const encoder = new TextEncoder();
+      const runId = crypto.randomUUID().replace(/-/g, "");
+      let seq = 0;
+      const sentFinal = new Set<string>();
+
+      const emit = (obj: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      };
+
+      emit({ type: "status", status: "running", prompt: session.prompt, aspect_ratio: session.aspect_ratio, run_id: runId });
+
+      try {
+        await consumeNdjson(upstream, async (data) => {
+          const err = data.error as { message?: string } | undefined;
+          if (err?.message) {
+            emit({ type: "error", message: String(err.message), code: "upstream_error", run_id: runId });
+            return;
+          }
+
+          const grok = (data as any).result?.response;
+          if (!grok) return;
+
+          const modelResp = grok.modelResponse;
+          const list = Array.isArray(modelResp?.generatedImageUrls) ? modelResp.generatedImageUrls : [];
+          for (const raw of list) {
+            if (typeof raw !== "string" || !raw.trim()) continue;
+            const imageId = `img_${base64UrlEncode(raw).slice(0, 16)}`;
+            const payload = toProxyAssetUrl(raw, settingsBundle.global, origin);
+            if (sentFinal.has(imageId)) continue;
+            seq += 1;
+            emit({
+              type: "image_generation.completed",
+              image_id: imageId,
+              sequence: seq,
+              url: payload,
+              aspect_ratio: session.aspect_ratio,
+              run_id: runId,
+              stage: "final",
+              created_at: Date.now(),
+            });
+            sentFinal.add(imageId);
+          }
+        });
+      } catch (e) {
+        emit({ type: "error", message: e instanceof Error ? e.message : String(e), code: "internal_error", run_id: runId });
+      }
+
+      emit({ type: "status", status: "stopped", run_id: runId });
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+      imagineSessions.delete(taskId);
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
+openAiRoutes.get("/public/imagine/ws", async (c) => {
+  // 旧前端优先走 WS，Worker 侧退化为 SSE 可避免升级协议复杂度
+  return c.redirect(`/v1/public/imagine/sse?${new URL(c.req.url).searchParams.toString()}`, 307);
+});
+
+openAiRoutes.post("/public/video/start", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+
+  const body = (await c.req.json()) as {
+    prompt?: string;
+    aspect_ratio?: string;
+    video_length?: number;
+    resolution_name?: string;
+    preset?: string;
+    image_url?: string | null;
+    reasoning_effort?: string | null;
+  };
+
+  const prompt = String(body?.prompt ?? "").trim();
+  if (!prompt) return c.json({ detail: "Prompt cannot be empty" }, 400);
+
+  const aspect_ratio = resolveVideoRatio(String(body?.aspect_ratio ?? "3:2"));
+  const video_length = [6, 10, 15].includes(Number(body?.video_length)) ? Number(body?.video_length) : 6;
+  const resolution_name = String(body?.resolution_name ?? "480p") === "720p" ? "720p" : "480p";
+  const presetRaw = String(body?.preset ?? "normal");
+  const preset: "fun" | "normal" | "spicy" | "custom" = ["fun", "normal", "spicy", "custom"].includes(presetRaw)
+    ? (presetRaw as any)
+    : "normal";
+  const image_url = body?.image_url ? String(body.image_url).trim() : null;
+  const reasoning_effort = body?.reasoning_effort ? String(body.reasoning_effort).trim() : null;
+
+  const task_id = crypto.randomUUID().replace(/-/g, "");
+  cleanupSessions(videoSessions, VIDEO_SESSION_TTL_MS);
+  videoSessions.set(task_id, {
+    prompt,
+    aspect_ratio,
+    video_length,
+    resolution_name,
+    preset,
+    image_url,
+    reasoning_effort,
+    created_at: Date.now(),
+  });
+
+  return c.json({ task_id, aspect_ratio });
+});
+
+openAiRoutes.post("/public/video/stop", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+  const body = (await c.req.json()) as { task_ids?: string[] };
+  const taskIds = Array.isArray(body?.task_ids) ? body.task_ids : [];
+  let removed = 0;
+  for (const taskId of taskIds) {
+    if (videoSessions.delete(String(taskId))) removed += 1;
+  }
+  return c.json({ status: "success", removed });
+});
+
+openAiRoutes.get("/public/video/sse", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+
+  const taskId = String(c.req.query("task_id") ?? "").trim();
+  const session = getVideoSession(taskId);
+  if (!session) return c.json({ detail: "Task not found" }, 404);
+
+  const settingsBundle = await getSettings(c.env);
+  const origin = new URL(c.req.url).origin;
+  const chosen = await selectBestToken(c.env.DB, "grok-imagine-0.9");
+  if (!chosen) return c.json({ error: "No available token" }, 503);
+
+  const jwt = chosen.token;
+  const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
+  const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
+
+  let imgIds: string[] = [];
+  let imgUris: string[] = [];
+  let postId: string | undefined;
+  if (session.image_url) {
+    const uploaded = await uploadImage(session.image_url, cookie, settingsBundle.grok);
+    if (uploaded.fileId) imgIds = [uploaded.fileId];
+    if (uploaded.fileUri) imgUris = [uploaded.fileUri];
+    if (imgUris.length) {
+      const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok);
+      postId = post.postId || undefined;
+    }
+  }
+
+  const { payload, referer } = buildConversationPayload({
+    requestModel: "grok-imagine-0.9",
+    content: session.prompt,
+    imgIds,
+    imgUris,
+    ...(postId ? { postId } : {}),
+    settings: settingsBundle.grok,
+  });
+
+  const modelConfigOverride = {
+    modelMap: {
+      videoGenModelConfig: {
+        aspectRatio: session.aspect_ratio,
+        resolutionName: session.resolution_name,
+        videoLength: session.video_length,
+        ...(postId ? { parentPostId: postId } : {}),
+      },
+    },
+  };
+  (payload as any).modelConfigOverride = modelConfigOverride;
+
+  const modeMap: Record<string, string> = {
+    fun: "--mode=extremely-crazy",
+    normal: "--mode=normal",
+    spicy: "--mode=extremely-spicy-or-crazy",
+    custom: "--mode=custom",
+  };
+  (payload as any).message = `${session.prompt} ${modeMap[session.preset] ?? "--mode=normal"}`;
+
+  const upstream = await sendConversationRequest({
+    payload,
+    cookie,
+    settings: settingsBundle.grok,
+    ...(referer ? { referer } : {}),
+  });
+
+  if (!upstream.ok || !upstream.body) {
+    const txt = await upstream.text().catch(() => "");
+    await recordTokenFailure(c.env.DB, jwt, upstream.status, txt.slice(0, 200));
+    await applyCooldown(c.env.DB, jwt, upstream.status);
+    return c.json({ detail: `upstream_${upstream.status}` }, 502);
+  }
+
+  const encoder = new TextEncoder();
+  const sse = new ReadableStream<Uint8Array>({
+    start: async (controller) => {
+      const emitChunk = (data: Record<string, unknown>) => {
+        const payloadOut = {
+          id: `chatcmpl-${crypto.randomUUID()}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: "grok-imagine-0.9",
+          choices: [
+            {
+              index: 0,
+              delta: data,
+              finish_reason: null,
+            },
+          ],
+        };
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(payloadOut)}\n\n`));
+      };
+
+      let lastProgress = -1;
+      let sawVideo = false;
+      try {
+        await consumeNdjson(upstream, async (line) => {
+          const err = line.error as { message?: string } | undefined;
+          if (err?.message) {
+            emitChunk({ content: `错误：${String(err.message)}` });
+            return;
+          }
+          const grok = (line as any).result?.response;
+          if (!grok) return;
+
+          const videoResp = grok.streamingVideoGenerationResponse;
+          if (videoResp) {
+            const progress = typeof videoResp.progress === "number" ? videoResp.progress : 0;
+            if (progress > lastProgress) {
+              lastProgress = progress;
+              emitChunk({ content: `进度 ${progress}%` });
+            }
+            const videoUrl = typeof videoResp.videoUrl === "string" ? videoResp.videoUrl : "";
+            if (videoUrl) {
+              sawVideo = true;
+              const path = videoUrl.replaceAll("/", "-");
+              const proxy = `${(settingsBundle.global.base_url ?? "").trim() || origin}/images/${path}`;
+              emitChunk({ content: `<video src="${proxy}" controls="controls" width="500" height="300"></video>\n` });
+            }
+          }
+        });
+      } catch (e) {
+        emitChunk({ content: `错误：${e instanceof Error ? e.message : String(e)}` });
+      }
+
+      if (!sawVideo) emitChunk({ content: "生成结束，但未返回视频链接" });
+
+      const done = {
+        id: `chatcmpl-${crypto.randomUUID()}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: "grok-imagine-0.9",
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: "stop",
+          },
+        ],
+      };
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(done)}\n\n`));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+      videoSessions.delete(taskId);
+    },
+  });
+
+  return new Response(sse, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
+});
+
+openAiRoutes.get("/public/voice/token", async (c) => {
+  const denied = await requireLegacyPublic(c);
+  if (denied) return denied;
+
+  const voice = String(c.req.query("voice") ?? "ara");
+  const personality = String(c.req.query("personality") ?? "assistant");
+  const speed = Number(c.req.query("speed") ?? "1.0");
+
+  const settings = await getSettings(c.env);
+  const chosen = (await selectBestToken(c.env.DB, "grok-4-fast")) ?? (await selectBestToken(c.env.DB, "grok-4"));
+  if (!chosen) return c.json({ error: "No available tokens for voice mode", code: "no_token" }, 503);
+
+  const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
+  const cookie = cf ? `sso-rw=${chosen.token};sso=${chosen.token};${cf}` : `sso-rw=${chosen.token};sso=${chosen.token}`;
+  const headers = getDynamicHeaders(settings.grok, "/rest/livekit/tokens");
+  headers.Cookie = cookie;
+
+  const payload = {
+    sessionPayload: JSON.stringify({
+      voice,
+      personality,
+      playback_speed: Number.isFinite(speed) ? speed : 1.0,
+      enable_vision: false,
+      turn_detection: { type: "server_vad" },
+    }),
+    requestAgentDispatch: false,
+    livekitUrl: "wss://livekit.grok.com",
+    params: { enable_markdown_transcript: "true" },
+  };
+
+  const upstream = await fetch("https://grok.com/rest/livekit/tokens", {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+
+  if (!upstream.ok) {
+    const txt = await upstream.text().catch(() => "");
+    await recordTokenFailure(c.env.DB, chosen.token, upstream.status, txt.slice(0, 200));
+    await applyCooldown(c.env.DB, chosen.token, upstream.status);
+    return c.json({ error: `Voice token error: upstream_${upstream.status}`, code: "voice_error" }, 502);
+  }
+
+  const data = (await upstream.json().catch(() => ({}))) as Record<string, any>;
+  const token = String(data.token ?? "").trim();
+  if (!token) return c.json({ error: "Upstream returned no voice token", code: "upstream_error" }, 502);
+
+  return c.json({ token, url: "wss://livekit.grok.com", participant_name: "", room_name: "" });
 });
 
 openAiRoutes.get("/admin/storage", async (c) => {
@@ -419,7 +1174,7 @@ openAiRoutes.post("/admin/tokens/nsfw/enable/async", async (c) => {
 openAiRoutes.get("/admin/cache", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
-  const scope = c.req.query("scope") === "all" ? "all" : c.req.query("tokens") ? "selected" : "none";
+  const scope = c.req.query("scope") === "all" ? "all" : c.req.query("tokens") ? "selected" : c.req.query("token") ? "selected" : "none";
   const token = String(c.req.query("token") ?? "");
   const data = await buildLegacyCacheStats(c.env, scope as "all" | "selected" | "none", token);
   return c.json(data);
@@ -486,8 +1241,33 @@ openAiRoutes.post("/admin/cache/online/load/async", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
   const body = (await c.req.json()) as { tokens?: string[] };
-  const result = await buildLegacyCacheStats(c.env, "selected");
-  const taskId = createLegacyTask("cache-online-load", Array.isArray(body?.tokens) ? body.tokens.length : 0, result);
+  const allRows = await listTokens(c.env.DB);
+  const requested = Array.isArray(body?.tokens) ? body.tokens.map((t) => String(t ?? "").trim()).filter(Boolean) : [];
+  const tokens = requested.length ? requested : allRows.map((r) => r.token);
+  const settings = await getSettings(c.env);
+
+  const { details, total } = await buildOnlineDetails(c.env, settings, tokens);
+  const stats = await buildLegacyCacheStats(c.env, tokens.length ? "selected" : "all");
+  const summary = onlineSummaryFromDetails(details);
+  const result = {
+    ...stats,
+    online: {
+      ...stats.online,
+      count: summary.count,
+      status: summary.status,
+      last_asset_clear_at: summary.last_asset_clear_at,
+    },
+    online_details: details,
+    online_scope: tokens.length === allRows.length ? "all" : "selected",
+  };
+
+  const taskId = createLegacyTask("cache-online-load", tokens.length, {
+    ...result,
+    online: {
+      ...result.online,
+      count: total,
+    },
+  });
   return c.json({ status: "success", task_id: taskId });
 });
 
@@ -495,16 +1275,51 @@ openAiRoutes.post("/admin/cache/online/clear/async", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
   const body = (await c.req.json()) as { tokens?: string[] };
-  const results: Record<string, { status: string }> = {};
-  for (const token of Array.isArray(body?.tokens) ? body.tokens : []) results[String(token)] = { status: "success" };
-  const taskId = createLegacyTask("cache-online-clear", Object.keys(results).length, { results });
+  const allRows = await listTokens(c.env.DB);
+  const requested = Array.isArray(body?.tokens) ? body.tokens.map((t) => String(t ?? "").trim()).filter(Boolean) : [];
+  const tokens = requested.length ? requested : allRows.map((r) => r.token);
+  const settings = await getSettings(c.env);
+  const results: Record<string, { status: string; success?: number; failed?: number; error?: string }> = {};
+
+  for (const token of tokens) {
+    try {
+      const assetIds = await listRemoteAssetIds(c.env, token, settings);
+      const cleared = await clearRemoteAssets(c.env, token, assetIds, settings);
+      results[token] = { status: cleared.failed > 0 ? "partial" : "success", success: cleared.success, failed: cleared.failed };
+      onlineAssetState.set(token, { count: 0, status: cleared.failed > 0 ? "error: partial_clear_failed" : "ok" });
+    } catch (e) {
+      results[token] = { status: "error", error: e instanceof Error ? e.message : String(e) };
+      onlineAssetState.set(token, { count: 0, status: `error: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+
+  const taskId = createLegacyTask("cache-online-clear", tokens.length, { results });
   return c.json({ status: "success", task_id: taskId });
 });
 
 openAiRoutes.post("/admin/cache/online/clear", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
-  return c.json({ status: "success", result: { success: 0, failed: 0 } });
+  const body = (await c.req.json().catch(() => ({}))) as { token?: string };
+  const token = String(body?.token ?? "").trim();
+  if (!token) return c.json({ status: "error", detail: "missing_token" }, 400);
+
+  const settings = await getSettings(c.env);
+  try {
+    const assetIds = await listRemoteAssetIds(c.env, token, settings);
+    const result = await clearRemoteAssets(c.env, token, assetIds, settings);
+    onlineAssetState.set(token, { count: 0, status: result.failed > 0 ? "error: partial_clear_failed" : "ok" });
+    return c.json({ status: "success", result });
+  } catch (e) {
+    return c.json(
+      {
+        status: "error",
+        detail: e instanceof Error ? e.message : String(e),
+        result: { success: 0, failed: 0 },
+      },
+      500,
+    );
+  }
 });
 
 openAiRoutes.get("/admin/batch/:taskId/stream", async (c) => {
