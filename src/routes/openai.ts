@@ -82,9 +82,22 @@ function toPoolName(tokenType: "sso" | "ssoSuper"): "ssoBasic" | "ssoSuper" {
 
 async function getLegacyAppKey(env: Env): Promise<string> {
   const settings = await getSettings(env);
-  const appKey = String(settings.grok.api_key ?? "").trim();
-  const fallback = String(settings.global.admin_password ?? "").trim();
-  return appKey || fallback;
+  return String(settings.global.admin_password ?? "").trim();
+}
+
+async function getLegacyApiKey(env: Env): Promise<string> {
+  const settings = await getSettings(env);
+  return String(settings.grok.api_key ?? "").trim();
+}
+
+async function getLegacyPublicConfig(env: Env): Promise<{ enabled: boolean; key: string }> {
+  const settings = await getSettings(env);
+  const publicKey = String(settings.global.public_key ?? "").trim();
+  const apiKey = await getLegacyApiKey(env);
+  return {
+    enabled: settings.global.public_enabled !== false,
+    key: publicKey || apiKey,
+  };
 }
 
 async function requireLegacyAdmin(c: any): Promise<Response | null> {
@@ -102,9 +115,9 @@ function toLegacyConfig(settings: Awaited<ReturnType<typeof getSettings>>): Reco
   return {
     app: {
       api_key: settings.grok.api_key ?? "",
-      app_key: settings.grok.api_key ?? "",
-      public_enabled: true,
-      public_key: "",
+      app_key: settings.global.admin_password ?? "",
+      public_enabled: settings.global.public_enabled !== false,
+      public_key: settings.global.public_key ?? "",
       app_url: settings.global.base_url ?? "",
       image_format: settings.global.image_mode ?? "url",
       temporary: settings.grok.temporary ?? false,
@@ -274,8 +287,9 @@ async function requireLegacyPublic(c: any): Promise<Response | null> {
   const bearer = parseBearer(c.req.header("Authorization") ?? null);
   const queryKey = String(c.req.query("public_key") ?? "").trim();
   const provided = bearer || queryKey;
-  const settings = await getSettings(c.env as Env);
-  const expected = String(settings.grok.api_key ?? "").trim();
+  const cfg = await getLegacyPublicConfig(c.env as Env);
+  if (!cfg.enabled) return c.json({ status: "error", detail: "Public access is disabled" }, 401);
+  const expected = cfg.key;
   if (!expected) return null;
   if (provided && provided === expected) return null;
   return c.json({ status: "error", detail: "Unauthorized" }, 401);
@@ -530,32 +544,16 @@ openAiRoutes.use(
 
 // Admin verification endpoint for frontend (app_key validation)
 openAiRoutes.get("/admin/verify", async (c) => {
-  const authHeader = c.req.header("Authorization");
-  if (!authHeader) return c.json({ error: "Missing Authorization header" }, 401);
-  
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  const token = match?.[1]?.trim();
-  if (!token) return c.json({ error: "Invalid Authorization format" }, 401);
-  
-  const settings = await getSettings(c.env);
-  const apiKey = (settings.grok.api_key ?? "").trim();
-  
-  if (!apiKey) {
-    // If no API key is configured, deny access to admin panel
-    return c.json({ error: "Admin access not configured" }, 401);
-  }
-  
-  if (token === apiKey) {
-    return c.json({ success: true }, 200);
-  }
-  
-  return c.json({ error: "Invalid app_key" }, 401);
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+  return c.json({ success: true }, 200);
 });
 
 openAiRoutes.get("/public/verify", async (c) => {
   const bearer = parseBearer(c.req.header("Authorization") ?? null);
-  const settings = await getSettings(c.env);
-  const required = String(settings.grok.api_key ?? "").trim();
+  const cfg = await getLegacyPublicConfig(c.env);
+  if (!cfg.enabled) return c.json({ status: "error", detail: "Public access is disabled" }, 401);
+  const required = cfg.key;
   if (!required) return c.json({ status: "success" });
   if (bearer && bearer === required) return c.json({ status: "success" });
   return c.json({ status: "error", detail: "Unauthorized" }, 401);
@@ -1014,9 +1012,12 @@ openAiRoutes.post("/admin/config", async (c) => {
     image_mode: app.image_format === "base64" ? "base64" : "url",
   };
   if (typeof app.app_url === "string") globalConfig.base_url = app.app_url;
+  if (typeof app.app_key === "string") globalConfig.admin_password = app.app_key;
+  if (typeof app.public_enabled === "boolean") globalConfig.public_enabled = app.public_enabled;
+  if (typeof app.public_key === "string") globalConfig.public_key = app.public_key;
 
   const grokConfig: Record<string, unknown> = {};
-  if (typeof app.app_key === "string") grokConfig.api_key = app.app_key;
+  if (typeof app.api_key === "string") grokConfig.api_key = app.api_key;
   if (typeof proxy.base_proxy_url === "string") grokConfig.proxy_url = proxy.base_proxy_url;
   if (typeof proxy.asset_proxy_url === "string") grokConfig.cache_proxy_url = proxy.asset_proxy_url;
   if (typeof proxy.cf_clearance === "string") grokConfig.cf_clearance = proxy.cf_clearance;

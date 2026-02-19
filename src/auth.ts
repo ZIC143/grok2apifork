@@ -55,6 +55,12 @@ export const requireApiAuth: MiddlewareHandler<{ Bindings: Env; Variables: { api
     return next();
   }
 
+  const publicKey = (settings.global.public_key ?? "").trim();
+  if (publicKey && token === publicKey) {
+    c.set("apiAuth", { key: token, name: "Public Client", is_admin: false });
+    return next();
+  }
+
   const keyInfo = await validateApiKey(c.env.DB, token);
   if (keyInfo) {
     c.set("apiAuth", { key: keyInfo.key, name: keyInfo.name, is_admin: false });

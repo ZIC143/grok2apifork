@@ -8,6 +8,8 @@ export interface GlobalSettings {
   image_mode?: "url" | "base64";
   admin_username?: string;
   admin_password?: string;
+  public_enabled?: boolean;
+  public_key?: string;
   image_cache_max_size_mb?: number;
   video_cache_max_size_mb?: number;
 }
@@ -41,7 +43,9 @@ const DEFAULTS: SettingsBundle = {
     log_level: "INFO",
     image_mode: "url",
     admin_username: "admin",
-    admin_password: "admin",
+    admin_password: "grok2api",
+    public_enabled: true,
+    public_key: "",
     image_cache_max_size_mb: 512,
     video_cache_max_size_mb: 1024,
   },
