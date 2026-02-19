@@ -378,7 +378,41 @@ openAiRoutes.post("/admin/tokens/nsfw/enable/async", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
   const body = (await c.req.json()) as { tokens?: string[] };
-  const taskId = createLegacyTask("tokens-nsfw", Array.isArray(body?.tokens) ? body.tokens.length : 0);
+  const targets = Array.isArray(body?.tokens)
+    ? body.tokens.map((t) => String(t ?? "").trim()).filter(Boolean)
+    : [];
+
+  const rows = await listTokens(c.env.DB);
+  let ok = 0;
+  let fail = 0;
+  const details: Record<string, { status: "success" | "error"; detail?: string }> = {};
+
+  for (const token of targets) {
+    const matched = rows.filter((r) => r.token === token);
+    if (!matched.length) {
+      fail += 1;
+      details[token] = { status: "error", detail: "token_not_found" };
+      continue;
+    }
+
+    try {
+      for (const row of matched) {
+        const tags = parseTags(row.tags);
+        if (!tags.includes("nsfw")) tags.push("nsfw");
+        await updateTokenTags(c.env.DB, row.token, row.token_type, tags);
+      }
+      ok += 1;
+      details[token] = { status: "success" };
+    } catch (e) {
+      fail += 1;
+      details[token] = { status: "error", detail: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  const taskId = createLegacyTask("tokens-nsfw", targets.length, {
+    summary: { ok, fail },
+    results: details,
+  });
   return c.json({ status: "success", task_id: taskId });
 });
 
