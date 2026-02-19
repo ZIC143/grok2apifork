@@ -9,6 +9,7 @@ import { uploadImage } from "../grok/upload";
 import { createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { getDynamicHeaders } from "../grok/headers";
+import { checkRateLimits } from "../grok/rateLimits";
 import { addRequestLog } from "../repo/logs";
 import {
   addTokens,
@@ -528,6 +529,41 @@ function onlineSummaryFromDetails(details: Array<Record<string, unknown>>): { co
     if (t > 0) last_asset_clear_at = Math.max(last_asset_clear_at ?? 0, t);
   }
   return { count, status, last_asset_clear_at };
+}
+
+async function refreshTokenQuota(
+  env: Env,
+  settings: Awaited<ReturnType<typeof getSettings>>,
+  row: Awaited<ReturnType<typeof listTokens>>[number],
+): Promise<{ ok: boolean; detail?: string }> {
+  try {
+    const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
+    const cookie = cf ? `sso-rw=${row.token};sso=${row.token};${cf}` : `sso-rw=${row.token};sso=${row.token}`;
+
+    const basic = await checkRateLimits(cookie, settings.grok, "grok-4-fast");
+    if (!basic) {
+      await applyCooldown(env.DB, row.token, 500);
+      return { ok: false, detail: "rate_limit_check_failed" };
+    }
+
+    const remaining = Number((basic as any).remainingTokens);
+    if (Number.isFinite(remaining)) {
+      await updateTokenLimits(env.DB, row.token, { remaining_queries: Math.floor(remaining) });
+    }
+
+    if (row.token_type === "ssoSuper") {
+      const heavy = await checkRateLimits(cookie, settings.grok, "grok-4-heavy");
+      const heavyRemaining = Number((heavy as any)?.remainingTokens);
+      if (Number.isFinite(heavyRemaining)) {
+        await updateTokenLimits(env.DB, row.token, { heavy_remaining_queries: Math.floor(heavyRemaining) });
+      }
+    }
+
+    return { ok: true };
+  } catch (e) {
+    await applyCooldown(env.DB, row.token, 500);
+    return { ok: false, detail: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 export const openAiRoutes = new Hono<{ Bindings: Env; Variables: { apiAuth: ApiAuthInfo } }>();
@@ -1119,14 +1155,37 @@ openAiRoutes.post("/admin/tokens/refresh", async (c) => {
   if (denied) return denied;
   const body = (await c.req.json()) as { token?: string };
   const token = String(body?.token ?? "").trim();
-  return c.json({ status: "success", results: token ? { [token]: true } : {} });
+  if (!token) return c.json({ status: "error", detail: "missing_token" }, 400);
+
+  const rows = await listTokens(c.env.DB);
+  const row = rows.find((r) => r.token === token);
+  if (!row) return c.json({ status: "success", results: { [token]: false } });
+
+  const settings = await getSettings(c.env);
+  const refreshed = await refreshTokenQuota(c.env, settings, row);
+  return c.json({
+    status: "success",
+    results: { [token]: refreshed.ok },
+    ...(refreshed.ok ? {} : { detail: refreshed.detail ?? "refresh_failed" }),
+  });
 });
 
 openAiRoutes.post("/admin/tokens/refresh/async", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
   const body = (await c.req.json()) as { tokens?: string[] };
-  const taskId = createLegacyTask("tokens-refresh", Array.isArray(body?.tokens) ? body.tokens.length : 0);
+  const rows = await listTokens(c.env.DB);
+  const requested = Array.isArray(body?.tokens) ? body.tokens.map((t) => String(t ?? "").trim()).filter(Boolean) : [];
+  const targetRows = requested.length ? rows.filter((r) => requested.includes(r.token)) : rows;
+  const settings = await getSettings(c.env);
+
+  const results: Record<string, boolean> = {};
+  for (const row of targetRows) {
+    const refreshed = await refreshTokenQuota(c.env, settings, row);
+    results[row.token] = refreshed.ok;
+  }
+
+  const taskId = createLegacyTask("tokens-refresh", targetRows.length, { results });
   return c.json({ status: "success", task_id: taskId });
 });
 
