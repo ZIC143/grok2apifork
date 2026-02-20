@@ -117,7 +117,9 @@ async def _call_case(client: httpx.AsyncClient, case: Case, model: str) -> tuple
 
 async def main() -> int:
     base_url = os.getenv("BASE_URL", "http://127.0.0.1:8000").rstrip("/")
-    api_key = os.getenv("API_KEY", "").strip()
+    if base_url.endswith("/v1"):
+        base_url = base_url[:-3]
+    api_key = (os.getenv("API_KEY", "") or os.getenv("API_KAY", "")).strip()
     model = os.getenv("MODEL", "grok-4.1-thinking").strip() or "grok-4.1-thinking"
     timeout = float(os.getenv("REQUEST_TIMEOUT", "120"))
 
