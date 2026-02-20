@@ -274,6 +274,19 @@ python scripts/verify_think_search.py
 - `API_KEY`（如启用鉴权）
 - `MODEL`（默认 `grok-4.1-thinking`）
 - `REQUEST_TIMEOUT`（默认 `120` 秒）
+- `VERIFY_MODE`：`strict`（默认）或 `compatible`（兼容自然语言搜索过程文案）
+- `DEBUG_THINK_SEARCH`：`true/false`（默认 `false`，为 `true` 时附带 `X-Debug-Think-Search: true` 并打印服务端回显）
+
+### Think/Search 调试响应头（Worker）
+
+当请求带上 `X-Debug-Think-Search: true` 时，`/v1/chat/completions` 会附带以下响应头（流式/非流式都支持）：
+
+- `X-Debug-Show-Thinking`：本次请求最终生效的 thinking 开关
+- `X-Debug-Show-Search`：本次请求最终生效的 show_search 开关
+- `X-Debug-Is-Reasoning`：传给上游的 `isReasoning`
+- `X-Debug-Reasoning-Effort`：请求中的 `reasoning_effort`（若无则为空）
+
+该调试能力默认关闭，不影响常规请求。
 
 <br>
 

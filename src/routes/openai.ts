@@ -1596,6 +1596,11 @@ openAiRoutes.post("/chat/completions", async (c) => {
   const ip = getClientIp(c.req.raw);
   const keyName = c.get("apiAuth").name ?? "Unknown";
   let maxLogEntries = 1000;
+  const debugThinkSearchHeader = String(c.req.header("X-Debug-Think-Search") ?? "").trim().toLowerCase();
+  const debugThinkSearchEnabled =
+    debugThinkSearchHeader === "1" ||
+    debugThinkSearchHeader === "true" ||
+    debugThinkSearchHeader === "yes";
 
   const origin = new URL(c.req.url).origin;
 
@@ -1645,6 +1650,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           ...settingsBundle.global,
           show_search: requestShowSearch,
         };
+    const effectiveShowSearch = runtimeGlobalSettings.show_search !== false;
     const maxRetry = 3;
     let lastErr: string | null = null;
 
@@ -1809,6 +1815,18 @@ openAiRoutes.post("/chat/completions", async (c) => {
               "X-Accel-Buffering": "no",
               "Access-Control-Allow-Origin": "*",
               "X-Conversation-ID": resolvedConv.conversationId,
+              ...(debugThinkSearchEnabled
+                ? {
+                    "X-Debug-Show-Thinking": String(effectiveShowThinking),
+                    "X-Debug-Show-Search": String(effectiveShowSearch),
+                    "X-Debug-Is-Reasoning": String(isReasoning),
+                    "X-Debug-Reasoning-Effort": reasoningEffort ?? "",
+                    "Access-Control-Expose-Headers":
+                      "X-Conversation-ID, X-Debug-Show-Thinking, X-Debug-Show-Search, X-Debug-Is-Reasoning, X-Debug-Reasoning-Effort",
+                  }
+                : {
+                    "Access-Control-Expose-Headers": "X-Conversation-ID",
+                  }),
             },
           });
         }
@@ -1857,6 +1875,13 @@ openAiRoutes.post("/chat/completions", async (c) => {
           ...parsed.response,
           conversation_id: resolvedConv.conversationId,
         };
+
+        if (debugThinkSearchEnabled) {
+          c.header("X-Debug-Show-Thinking", String(effectiveShowThinking));
+          c.header("X-Debug-Show-Search", String(effectiveShowSearch));
+          c.header("X-Debug-Is-Reasoning", String(isReasoning));
+          c.header("X-Debug-Reasoning-Effort", reasoningEffort ?? "");
+        }
 
         const duration = (Date.now() - start) / 1000;
         await addRequestLog(c.env.DB, {

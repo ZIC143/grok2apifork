@@ -248,6 +248,19 @@ Optional env vars:
 - `API_KEY` (if auth is enabled)
 - `MODEL` (default: `grok-4.1-thinking`)
 - `REQUEST_TIMEOUT` (default: `120` seconds)
+- `VERIFY_MODE`: `strict` (default) or `compatible` (accept natural-language search-process evidence)
+- `DEBUG_THINK_SEARCH`: `true/false` (default `false`; when enabled, sends `X-Debug-Think-Search: true` and prints server debug echoes)
+
+### Think/Search Debug Response Headers (Worker)
+
+When request header `X-Debug-Think-Search: true` is present, `/v1/chat/completions` will include these response headers (both stream and non-stream):
+
+- `X-Debug-Show-Thinking`: effective thinking toggle for this request
+- `X-Debug-Show-Search`: effective show_search toggle for this request
+- `X-Debug-Is-Reasoning`: upstream `isReasoning` value
+- `X-Debug-Reasoning-Effort`: request `reasoning_effort` (empty if absent)
+
+This debug feature is disabled by default and does not affect normal requests.
 
 <br>
 
