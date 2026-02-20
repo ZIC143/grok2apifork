@@ -64,3 +64,73 @@ export async function deleteRequestLogsBefore(db: Env["DB"], beforeTs: number): 
   return count;
 }
 
+export async function getRequestTrend(
+  db: Env["DB"],
+  args: { windowMs: number; bucket: "hour" | "day" },
+): Promise<Array<{ timestamp: number; total: number; success: number; error: number; avg_duration_ms: number }>> {
+  const now = nowMs();
+  const begin = now - Math.max(60_000, Number(args.windowMs || 24 * 3600 * 1000));
+  const bucketMs = args.bucket === "day" ? 24 * 3600 * 1000 : 3600 * 1000;
+  const rows = await dbAll<{ timestamp: number; status: number; duration: number }>(
+    db,
+    "SELECT timestamp, status, duration FROM request_logs WHERE timestamp >= ? ORDER BY timestamp ASC",
+    [begin],
+  );
+
+  const map = new Map<number, { timestamp: number; total: number; success: number; error: number; durationTotal: number }>();
+  for (const row of rows) {
+    const ts = Number(row.timestamp || 0);
+    const slot = ts - (ts % bucketMs);
+    const cur = map.get(slot) ?? { timestamp: slot, total: 0, success: 0, error: 0, durationTotal: 0 };
+    cur.total += 1;
+    if (Number(row.status || 0) === 200) cur.success += 1;
+    else cur.error += 1;
+    cur.durationTotal += Number(row.duration || 0);
+    map.set(slot, cur);
+  }
+
+  return Array.from(map.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((x) => ({
+      timestamp: x.timestamp,
+      total: x.total,
+      success: x.success,
+      error: x.error,
+      avg_duration_ms: x.total > 0 ? Number((x.durationTotal * 1000 / x.total).toFixed(2)) : 0,
+    }));
+}
+
+export async function getModelDistribution(
+  db: Env["DB"],
+  args: { windowMs: number },
+): Promise<Array<{ model: string; count: number; success: number; error: number; avg_duration_ms: number }>> {
+  const now = nowMs();
+  const begin = now - Math.max(60_000, Number(args.windowMs || 24 * 3600 * 1000));
+  const rows = await dbAll<{ model: string; status: number; duration: number }>(
+    db,
+    "SELECT model, status, duration FROM request_logs WHERE timestamp >= ?",
+    [begin],
+  );
+
+  const map = new Map<string, { model: string; count: number; success: number; error: number; durationTotal: number }>();
+  for (const row of rows) {
+    const model = String(row.model || "unknown");
+    const cur = map.get(model) ?? { model, count: 0, success: 0, error: 0, durationTotal: 0 };
+    cur.count += 1;
+    if (Number(row.status || 0) === 200) cur.success += 1;
+    else cur.error += 1;
+    cur.durationTotal += Number(row.duration || 0);
+    map.set(model, cur);
+  }
+
+  return Array.from(map.values())
+    .sort((a, b) => b.count - a.count)
+    .map((x) => ({
+      model: x.model,
+      count: x.count,
+      success: x.success,
+      error: x.error,
+      avg_duration_ms: x.count > 0 ? Number((x.durationTotal * 1000 / x.count).toFixed(2)) : 0,
+    }));
+}
+

@@ -66,8 +66,39 @@ class ConversationStore:
         except Exception:
             return 72000
 
+    def _max_per_token(self) -> int:
+        value = get_config("chat.max_conversations_per_token", 100)
+        try:
+            v = int(value)
+            return max(1, v)
+        except Exception:
+            return 100
+
     def _now(self) -> int:
         return int(time.time())
+
+    def _prune_token_records_inplace(self, token: str):
+        token = (token or "").strip()
+        if not token:
+            return
+        max_count = self._max_per_token()
+        token_items: List[Tuple[str, Dict[str, Any], int]] = []
+        for cid, item in self._records.items():
+            if not isinstance(item, dict):
+                continue
+            if item.get("token") != token:
+                continue
+            ts = int(item.get("updated_at", 0) or 0)
+            token_items.append((cid, item, ts))
+
+        if len(token_items) <= max_count:
+            return
+
+        token_items.sort(key=lambda x: x[2], reverse=True)
+        keep_ids = {cid for cid, _, _ in token_items[:max_count]}
+        for cid, _, _ in token_items[max_count:]:
+            if cid not in keep_ids:
+                self._records.pop(cid, None)
 
     def _hash_messages(self, messages: List[Dict[str, Any]], exclude_last_user: bool) -> str:
         system_parts: List[str] = []
@@ -252,6 +283,7 @@ class ConversationStore:
                 "updated_at": now,
                 "expires_at": now + ttl,
             }
+            self._prune_token_records_inplace(token)
             await self._save()
 
 

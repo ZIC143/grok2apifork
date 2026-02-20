@@ -14,6 +14,7 @@ export interface GlobalSettings {
   video_cache_max_size_mb?: number;
   log_retention_days?: number;
   conversation_ttl_seconds?: number;
+  conversation_max_per_token?: number;
 }
 
 export interface GrokSettings {
@@ -52,6 +53,7 @@ const DEFAULTS: SettingsBundle = {
     video_cache_max_size_mb: 1024,
     log_retention_days: 7,
     conversation_ttl_seconds: 72000,
+    conversation_max_per_token: 100,
   },
   grok: {
     api_key: "",

@@ -37,6 +37,7 @@ class ResponseLoggerMiddleware(BaseHTTPMiddleware):
             "/admin/config",
             "/admin/cache",
             "/admin/token",
+            "/admin/stats",
         ):
             return await call_next(request)
 

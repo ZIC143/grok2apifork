@@ -7,7 +7,7 @@ import base64
 import binascii
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,7 @@ from app.services.grok.services.chat import ChatService
 from app.services.grok.services.image import ImageGenerationService
 from app.services.grok.services.image_edit import ImageEditService
 from app.services.grok.services.model import ModelService
+from app.services.grok.services.request_stats import get_request_stats_store
 from app.services.grok.services.video import VideoService
 from app.services.token import get_token_manager
 from app.core.config import get_config
@@ -502,7 +503,7 @@ router = APIRouter(tags=["Chat"])
 
 
 @router.post("/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(request: ChatCompletionRequest, http_request: Request):
     """Chat Completions API - 兼容 OpenAI"""
     from app.core.logger import logger
 
@@ -510,188 +511,224 @@ async def chat_completions(request: ChatCompletionRequest):
     validate_request(request)
 
     logger.debug(f"Chat request: model={request.model}, stream={request.stream}")
+    started_at = time.time()
 
-    # 检测模型类型
-    model_info = ModelService.get(request.model)
-    if model_info and model_info.is_image_edit:
-        prompt, image_urls = _extract_prompt_images(request.messages)
-        if not image_urls:
-            raise ValidationException(
-                message="Image is required",
-                param="image",
-                code="missing_image",
-            )
-        image_url = image_urls[-1]
-
-        is_stream = (
-            request.stream if request.stream is not None else get_config("app.stream")
-        )
-        image_conf = request.image_config or ImageConfig()
-        _validate_image_config(image_conf, stream=bool(is_stream))
-        response_format = _resolve_image_format(image_conf.response_format)
-        response_field = _image_field(response_format)
-        n = image_conf.n or 1
-
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
-        token = None
-        for pool_name in ModelService.pool_candidates_for_model(request.model):
-            token = token_mgr.get_token(pool_name)
-            if token:
-                break
-
-        if not token:
-            raise AppException(
-                message="No available tokens. Please try again later.",
-                error_type=ErrorType.RATE_LIMIT.value,
-                code="rate_limit_exceeded",
-                status_code=429,
-            )
-
-        result = await ImageEditService().edit(
-            token_mgr=token_mgr,
-            token=token,
-            model_info=model_info,
-            prompt=prompt,
-            images=[image_url],
-            n=n,
-            response_format=response_format,
-            stream=bool(is_stream),
+    async def _record_stat(status: int):
+        stats_store = await get_request_stats_store()
+        await stats_store.add(
+            model=request.model,
+            status=status,
+            duration_ms=(time.time() - started_at) * 1000,
         )
 
-        if result.stream:
+    try:
+        # 检测模型类型
+        model_info = ModelService.get(request.model)
+
+        if model_info and model_info.is_image_edit:
+            prompt, image_urls = _extract_prompt_images(request.messages)
+            if not image_urls:
+                raise ValidationException(
+                    message="Image is required",
+                    param="image",
+                    code="missing_image",
+                )
+            image_url = image_urls[-1]
+
+            is_stream = (
+                request.stream if request.stream is not None else get_config("app.stream")
+            )
+            image_conf = request.image_config or ImageConfig()
+            _validate_image_config(image_conf, stream=bool(is_stream))
+            response_format = _resolve_image_format(image_conf.response_format)
+            response_field = _image_field(response_format)
+            n = image_conf.n or 1
+
+            token_mgr = await get_token_manager()
+            await token_mgr.reload_if_stale()
+
+            token = None
+            for pool_name in ModelService.pool_candidates_for_model(request.model):
+                token = token_mgr.get_token(pool_name)
+                if token:
+                    break
+
+            if not token:
+                raise AppException(
+                    message="No available tokens. Please try again later.",
+                    error_type=ErrorType.RATE_LIMIT.value,
+                    code="rate_limit_exceeded",
+                    status_code=429,
+                )
+
+            result = await ImageEditService().edit(
+                token_mgr=token_mgr,
+                token=token,
+                model_info=model_info,
+                prompt=prompt,
+                images=[image_url],
+                n=n,
+                response_format=response_format,
+                stream=bool(is_stream),
+            )
+
+            if result.stream:
+                await _record_stat(200)
+                return StreamingResponse(
+                    result.data,
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
+
+            data = [{response_field: img} for img in result.data]
+            await _record_stat(200)
+            return JSONResponse(
+                content={
+                    "created": int(time.time()),
+                    "data": data,
+                    "usage": {
+                        "total_tokens": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
+                    },
+                }
+            )
+
+        if model_info and model_info.is_image:
+            prompt, _ = _extract_prompt_images(request.messages)
+
+            is_stream = (
+                request.stream if request.stream is not None else get_config("app.stream")
+            )
+            image_conf = request.image_config or ImageConfig()
+            _validate_image_config(image_conf, stream=bool(is_stream))
+            response_format = _resolve_image_format(image_conf.response_format)
+            response_field = _image_field(response_format)
+            n = image_conf.n or 1
+            size = image_conf.size or "1024x1024"
+            aspect_ratio_map = {
+                "1280x720": "16:9",
+                "720x1280": "9:16",
+                "1792x1024": "3:2",
+                "1024x1792": "2:3",
+                "1024x1024": "1:1",
+            }
+            aspect_ratio = aspect_ratio_map.get(size, "2:3")
+
+            token_mgr = await get_token_manager()
+            await token_mgr.reload_if_stale()
+
+            token = None
+            for pool_name in ModelService.pool_candidates_for_model(request.model):
+                token = token_mgr.get_token(pool_name)
+                if token:
+                    break
+
+            if not token:
+                raise AppException(
+                    message="No available tokens. Please try again later.",
+                    error_type=ErrorType.RATE_LIMIT.value,
+                    code="rate_limit_exceeded",
+                    status_code=429,
+                )
+
+            result = await ImageGenerationService().generate(
+                token_mgr=token_mgr,
+                token=token,
+                model_info=model_info,
+                prompt=prompt,
+                n=n,
+                response_format=response_format,
+                size=size,
+                aspect_ratio=aspect_ratio,
+                stream=bool(is_stream),
+            )
+
+            if result.stream:
+                await _record_stat(200)
+                return StreamingResponse(
+                    result.data,
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
+
+            data = [{response_field: img} for img in result.data]
+            usage = result.usage_override or {
+                "total_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
+            }
+            await _record_stat(200)
+            return JSONResponse(
+                content={
+                    "created": int(time.time()),
+                    "data": data,
+                    "usage": usage,
+                }
+            )
+
+        conversation_id = ""
+        if model_info and model_info.is_video:
+            # 提取视频配置 (默认值在 Pydantic 模型中处理)
+            v_conf = request.video_config or VideoConfig()
+
+            result = await VideoService.completions(
+                model=request.model,
+                messages=[msg.model_dump() for msg in request.messages],
+                stream=request.stream,
+                reasoning_effort=request.reasoning_effort,
+                aspect_ratio=v_conf.aspect_ratio,
+                video_length=v_conf.video_length,
+                resolution=v_conf.resolution_name,
+                preset=v_conf.preset,
+            )
+        else:
+            request_conversation_id = (request.conversation_id or "").strip()
+            header_conversation_id = (
+                (http_request.headers.get("X-Conversation-ID") or "").strip()
+            )
+            if (
+                request_conversation_id
+                and header_conversation_id
+                and request_conversation_id != header_conversation_id
+            ):
+                logger.warning(
+                    "conversation_id conflict: body takes precedence over X-Conversation-ID"
+                )
+
+            conversation_id_input = request_conversation_id or header_conversation_id or None
+
+            result, conversation_id = await ChatService.completions(
+                model=request.model,
+                messages=[msg.model_dump() for msg in request.messages],
+                stream=request.stream,
+                reasoning_effort=request.reasoning_effort,
+                temperature=request.temperature,
+                top_p=request.top_p,
+                conversation_id=conversation_id_input,
+            )
+
+        if isinstance(result, dict):
+            if conversation_id:
+                result["conversation_id"] = conversation_id
+            await _record_stat(200)
+            return JSONResponse(content=result)
+        else:
+            await _record_stat(200)
             return StreamingResponse(
-                result.data,
+                result,
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-            )
-
-        data = [{response_field: img} for img in result.data]
-        return JSONResponse(
-            content={
-                "created": int(time.time()),
-                "data": data,
-                "usage": {
-                    "total_tokens": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Conversation-ID": conversation_id or "",
                 },
-            }
-        )
-
-    if model_info and model_info.is_image:
-        prompt, _ = _extract_prompt_images(request.messages)
-
-        is_stream = (
-            request.stream if request.stream is not None else get_config("app.stream")
-        )
-        image_conf = request.image_config or ImageConfig()
-        _validate_image_config(image_conf, stream=bool(is_stream))
-        response_format = _resolve_image_format(image_conf.response_format)
-        response_field = _image_field(response_format)
-        n = image_conf.n or 1
-        size = image_conf.size or "1024x1024"
-        aspect_ratio_map = {
-            "1280x720": "16:9",
-            "720x1280": "9:16",
-            "1792x1024": "3:2",
-            "1024x1792": "2:3",
-            "1024x1024": "1:1",
-        }
-        aspect_ratio = aspect_ratio_map.get(size, "2:3")
-
-        token_mgr = await get_token_manager()
-        await token_mgr.reload_if_stale()
-
-        token = None
-        for pool_name in ModelService.pool_candidates_for_model(request.model):
-            token = token_mgr.get_token(pool_name)
-            if token:
-                break
-
-        if not token:
-            raise AppException(
-                message="No available tokens. Please try again later.",
-                error_type=ErrorType.RATE_LIMIT.value,
-                code="rate_limit_exceeded",
-                status_code=429,
             )
-
-        result = await ImageGenerationService().generate(
-            token_mgr=token_mgr,
-            token=token,
-            model_info=model_info,
-            prompt=prompt,
-            n=n,
-            response_format=response_format,
-            size=size,
-            aspect_ratio=aspect_ratio,
-            stream=bool(is_stream),
-        )
-
-        if result.stream:
-            return StreamingResponse(
-                result.data,
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-            )
-
-        data = [{response_field: img} for img in result.data]
-        usage = result.usage_override or {
-            "total_tokens": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "input_tokens_details": {"text_tokens": 0, "image_tokens": 0},
-        }
-        return JSONResponse(
-            content={
-                "created": int(time.time()),
-                "data": data,
-                "usage": usage,
-            }
-        )
-
-    if model_info and model_info.is_video:
-        # 提取视频配置 (默认值在 Pydantic 模型中处理)
-        v_conf = request.video_config or VideoConfig()
-
-        result = await VideoService.completions(
-            model=request.model,
-            messages=[msg.model_dump() for msg in request.messages],
-            stream=request.stream,
-            reasoning_effort=request.reasoning_effort,
-            aspect_ratio=v_conf.aspect_ratio,
-            video_length=v_conf.video_length,
-            resolution=v_conf.resolution_name,
-            preset=v_conf.preset,
-        )
-    else:
-        result, conversation_id = await ChatService.completions(
-            model=request.model,
-            messages=[msg.model_dump() for msg in request.messages],
-            stream=request.stream,
-            reasoning_effort=request.reasoning_effort,
-            temperature=request.temperature,
-            top_p=request.top_p,
-            conversation_id=request.conversation_id,
-        )
-
-    if isinstance(result, dict):
-        if conversation_id:
-            result["conversation_id"] = conversation_id
-        return JSONResponse(content=result)
-    else:
-        return StreamingResponse(
-            result,
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Conversation-ID": conversation_id or "",
-            },
-        )
+    except Exception:
+        await _record_stat(500)
+        raise
 
 
 __all__ = ["router"]

@@ -83,14 +83,20 @@ docker compose up -d
 - **配置管理**：在线修改系统配置
 - **缓存管理**：查看和清理媒体缓存
 - **会话管理**：查看会话续接状态并支持后台清理
+- **请求统计**：查看 24h / 7d 请求趋势与模型分布（后台表格）
 
 > 新增：支持真实会话续接（`conversation_id`）、跨账号 `share/clone` 续接。
 
 ### 会话续接与跨账号续接
 
 - 请求可选参数：`conversation_id`
+- 也支持请求头：`X-Conversation-ID`（当 body 与 header 同时提供且不一致时，**body 优先**）
 - 响应会返回：`conversation_id`（非流式在 JSON 字段中，流式在响应头 `X-Conversation-ID`）
 - 当轮询切换到其他 token 时，系统会优先尝试 `share/clone` 以保持上下文连续
+
+### 健康检查
+
+- `GET /health`
 
 ### 管理接口（会话）
 
@@ -101,6 +107,16 @@ docker compose up -d
   - `GET /api/conversations`
   - `POST /api/conversations/clear`
   - Legacy: `GET /v1/admin/conversations` / `POST /v1/admin/conversations/clear`
+
+### 管理接口（统计）
+
+- Python 管理接口：
+  - `GET /v1/admin/stats/trend?window=24h|7d&bucket=hour|day`
+  - `GET /v1/admin/stats/models?window=24h|7d`
+- Worker 管理接口：
+  - `GET /api/stats/trend?window=24h|7d&bucket=hour|day`
+  - `GET /api/stats/models?window=24h|7d`
+  - Legacy: `GET /v1/admin/stats` / `GET /v1/admin/stats/trend` / `GET /v1/admin/stats/models`
 
 ### Worker 迁移
 
@@ -342,6 +358,8 @@ curl http://localhost:8000/v1/images/edits \
 | **chat** | `concurrent` | 并发上限 | Reverse 接口并发上限。 | `10` |
 |  | `timeout` | 请求超时 | Reverse 接口超时时间（秒）。 | `60` |
 |  | `stream_timeout` | 流空闲超时 | 流式空闲超时时间（秒）。 | `60` |
+|  | `conversation_ttl` | 会话TTL | 会话状态存活时间（秒）。 | `72000` |
+|  | `max_conversations_per_token` | 每Token会话上限 | 单个 Token 保留的最大会话数，超限按更新时间淘汰最旧会话。 | `100` |
 | **video** | `concurrent` | 并发上限 | Reverse 接口并发上限。 | `10` |
 |  | `timeout` | 请求超时 | Reverse 接口超时时间（秒）。 | `60` |
 |  | `stream_timeout` | 流空闲超时 | 流式空闲超时时间（秒）。 | `60` |

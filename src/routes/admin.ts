@@ -25,7 +25,13 @@ import {
   updateTokenLimits,
 } from "../repo/tokens";
 import { checkRateLimits } from "../grok/rateLimits";
-import { addRequestLog, clearRequestLogs, getRequestLogs } from "../repo/logs";
+import {
+  addRequestLog,
+  clearRequestLogs,
+  getModelDistribution,
+  getRequestLogs,
+  getRequestTrend,
+} from "../repo/logs";
 import { getRefreshProgress, setRefreshProgress } from "../repo/refreshProgress";
 import {
   deleteCacheRows,
@@ -363,6 +369,29 @@ adminRoutes.get("/api/stats", requireAdminAuth, async (c) => {
     return c.json({ success: true, data: { normal, super: superStats, total: normal.total + superStats.total } });
   } catch (e) {
     return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "STATS_ERROR"), 500);
+  }
+});
+
+adminRoutes.get("/api/stats/trend", requireAdminAuth, async (c) => {
+  try {
+    const window = String(c.req.query("window") ?? "24h").toLowerCase();
+    const bucket = String(c.req.query("bucket") ?? "hour").toLowerCase() === "day" ? "day" : "hour";
+    const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+    const items = await getRequestTrend(c.env.DB, { windowMs, bucket });
+    return c.json({ success: true, data: { window, bucket, items } });
+  } catch (e) {
+    return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "STATS_TREND_ERROR"), 500);
+  }
+});
+
+adminRoutes.get("/api/stats/models", requireAdminAuth, async (c) => {
+  try {
+    const window = String(c.req.query("window") ?? "24h").toLowerCase();
+    const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+    const items = await getModelDistribution(c.env.DB, { windowMs });
+    return c.json({ success: true, data: { window, items } });
+  } catch (e) {
+    return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "STATS_MODELS_ERROR"), 500);
   }
 });
 

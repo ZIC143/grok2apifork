@@ -146,6 +146,15 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "Grok2API",
+        "runtime": "python-fastapi",
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
 

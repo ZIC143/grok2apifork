@@ -16,7 +16,7 @@ import { createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { getDynamicHeaders } from "../grok/headers";
 import { checkRateLimits } from "../grok/rateLimits";
-import { addRequestLog } from "../repo/logs";
+import { addRequestLog, getModelDistribution, getRequestTrend } from "../repo/logs";
 import {
   addTokens,
   applyCooldown,
@@ -137,6 +137,7 @@ function toLegacyConfig(settings: Awaited<ReturnType<typeof getSettings>>): Reco
       image_format: settings.global.image_mode ?? "url",
       log_retention_days: settings.global.log_retention_days ?? 7,
       conversation_ttl_seconds: settings.global.conversation_ttl_seconds ?? 72000,
+      conversation_max_per_token: settings.global.conversation_max_per_token ?? 100,
       temporary: settings.grok.temporary ?? false,
       dynamic_statsig: settings.grok.dynamic_statsig ?? true,
       filter_tags: settings.grok.filtered_tags ?? "",
@@ -1070,6 +1071,8 @@ openAiRoutes.post("/admin/config", async (c) => {
   if (typeof app.log_retention_days === "number") globalConfig.log_retention_days = app.log_retention_days;
   if (typeof app.conversation_ttl_seconds === "number")
     globalConfig.conversation_ttl_seconds = app.conversation_ttl_seconds;
+  if (typeof app.conversation_max_per_token === "number")
+    globalConfig.conversation_max_per_token = app.conversation_max_per_token;
 
   const grokConfig: Record<string, unknown> = {};
   if (typeof app.api_key === "string") grokConfig.api_key = app.api_key;
@@ -1423,6 +1426,51 @@ openAiRoutes.get("/admin/conversations", async (c) => {
   });
 });
 
+openAiRoutes.get("/admin/stats/trend", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+
+  const window = String(c.req.query("window") ?? "24h").toLowerCase();
+  const bucket = String(c.req.query("bucket") ?? "hour").toLowerCase() === "day" ? "day" : "hour";
+  const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+  const items = await getRequestTrend(c.env.DB, { windowMs, bucket });
+  return c.json({ status: "success", window, bucket, items });
+});
+
+openAiRoutes.get("/admin/stats/models", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+
+  const window = String(c.req.query("window") ?? "24h").toLowerCase();
+  const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+  const items = await getModelDistribution(c.env.DB, { windowMs });
+  return c.json({ status: "success", window, items });
+});
+
+openAiRoutes.get("/admin/stats", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+
+  const window = String(c.req.query("window") ?? "24h").toLowerCase();
+  const bucket = String(c.req.query("bucket") ?? "hour").toLowerCase() === "day" ? "day" : "hour";
+  const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+
+  const [trend, models] = await Promise.all([
+    getRequestTrend(c.env.DB, { windowMs, bucket }),
+    getModelDistribution(c.env.DB, { windowMs }),
+  ]);
+
+  return c.json({
+    status: "success",
+    data: {
+      window,
+      bucket,
+      trend,
+      models,
+    },
+  });
+});
+
 openAiRoutes.post("/admin/conversations/clear", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
@@ -1531,6 +1579,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
       conversation_id?: string;
     };
 
+    const headerConversationId = String(c.req.header("X-Conversation-ID") ?? "").trim();
+
     requestedModel = String(body.model ?? "");
     if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
     if (!Array.isArray(body.messages)) return c.json(openAiError("Missing 'messages'", "missing_messages"), 400);
@@ -1555,12 +1605,20 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
+      const bodyConversationId = typeof body.conversation_id === "string" ? body.conversation_id.trim() : "";
+      const requestConversationId = bodyConversationId || headerConversationId;
+      if (bodyConversationId && headerConversationId && bodyConversationId !== headerConversationId) {
+        console.warn("conversation_id conflict: body takes precedence over X-Conversation-ID");
+      }
+
       const resolvedConv = await resolveConversation({
         env: c.env,
-        conversationIdFromReq: typeof body.conversation_id === "string" ? body.conversation_id : "",
+        conversationIdFromReq: requestConversationId,
         messages: body.messages as any,
       });
       let runtimeState = resolvedConv.state;
+      const conversationTtlSeconds = Math.max(60, Number(settingsBundle.global.conversation_ttl_seconds ?? 72000) || 72000);
+      const conversationMaxPerToken = Math.max(1, Number(settingsBundle.global.conversation_max_per_token ?? 100) || 100);
 
       if (
         runtimeState &&
@@ -1674,6 +1732,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
                   shareLinkId: nextShare,
                   token: jwt,
                   fullHash: resolvedConv.fullHash,
+                  ttlSeconds: conversationTtlSeconds,
+                  maxPerToken: conversationMaxPerToken,
                 });
               }
               await addRequestLog(c.env.DB, {
@@ -1736,6 +1796,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
             shareLinkId,
             token: jwt,
             fullHash: resolvedConv.fullHash,
+            ttlSeconds: conversationTtlSeconds,
+            maxPerToken: conversationMaxPerToken,
           });
         }
 

@@ -31,6 +31,7 @@ const NUMERIC_FIELDS = new Set([
   'concurrent',
   'batch_size',
   'conversation_ttl',
+  'max_conversations_per_token',
   'cleanup_interval_sec',
   'log_retention_days',
   'conversation_ttl_seconds'
@@ -83,7 +84,8 @@ const LOCALE_MAP = {
     "concurrent": { title: "并发上限", desc: "Reverse 接口并发上限。" },
     "timeout": { title: "请求超时", desc: "Reverse 接口超时时间（秒）。" },
     "stream_timeout": { title: "流空闲超时", desc: "流式空闲超时时间（秒）。" },
-    "conversation_ttl": { title: "会话TTL(秒)", desc: "会话上下文状态过期时间（秒）。" }
+    "conversation_ttl": { title: "会话TTL(秒)", desc: "会话上下文状态过期时间（秒）。" },
+    "max_conversations_per_token": { title: "每Token会话上限", desc: "单个 Token 保留的最大会话数，超出后按更新时间淘汰最旧会话。" }
   },
 
 

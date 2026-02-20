@@ -132,7 +132,10 @@ export async function saveConversationState(args: {
   shareLinkId?: string;
   token: string;
   fullHash: string;
+  ttlSeconds?: number;
+  maxPerToken?: number;
 }): Promise<void> {
+  const ttlSeconds = Math.max(60, Number(args.ttlSeconds ?? 72000) || 72000);
   await upsertConversation(args.env.DB, {
     conversation_id: args.conversationId,
     upstream_conversation_id: args.upstreamConversationId ?? null,
@@ -141,6 +144,7 @@ export async function saveConversationState(args: {
     token: args.token,
     full_hash: args.fullHash,
     updated_at: nowMs(),
-    expires_at: nowMs() + ttlMs(),
+    expires_at: nowMs() + ttlSeconds * 1000,
+    max_per_token: Number(args.maxPerToken ?? 0) || 0,
   });
 }

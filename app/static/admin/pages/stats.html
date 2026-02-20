@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grok2API - 请求统计</title>
+  <link rel="icon" href="/static/common/img/favicon/favicon.ico">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-sans/style.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/geist@1.0.0/dist/fonts/geist-mono/style.css" rel="stylesheet">
+  <link href="/static/common/css/common.css?v=0.3.1" rel="stylesheet">
+  <link href="/static/common/css/toast.css" rel="stylesheet">
+  <link href="/static/admin/css/stats.css?v=0.3.1" rel="stylesheet">
+</head>
+
+<body class="min-h-screen flex flex-col" style="background-color: var(--bg);">
+  <div id="toast-container" class="toast-container"></div>
+  <div id="app-header"></div>
+
+  <main class="space-y-6 flex-1 container mx-auto max-w-5xl px-6 py-8 fade-in">
+    <div class="space-y-6">
+      <div class="flex justify-between items-center">
+        <div>
+          <h2 class="text-2xl font-semibold tracking-tight">请求统计</h2>
+          <p class="text-[var(--accents-4)] mt-1 text-sm">查看最近请求趋势与模型分布。</p>
+        </div>
+      </div>
+
+      <div class="h-px bg-[var(--border)] my-6"></div>
+
+      <div class="panel flex gap-3 items-center flex-wrap">
+        <label class="text-sm text-[var(--accents-5)]">时间窗口</label>
+        <select id="window" class="geist-input h-[34px] w-[140px]">
+          <option value="24h" selected>最近24小时</option>
+          <option value="7d">最近7天</option>
+        </select>
+        <label class="text-sm text-[var(--accents-5)]">趋势粒度</label>
+        <select id="bucket" class="geist-input h-[34px] w-[140px]">
+          <option value="hour" selected>按小时</option>
+          <option value="day">按天</option>
+        </select>
+        <button id="btn-refresh" class="geist-button-outline">刷新</button>
+      </div>
+
+      <div class="panel">
+        <h3 class="title">请求趋势</h3>
+        <div class="rounded-lg overflow-hidden bg-white overflow-x-auto">
+          <table class="geist-table min-w-[860px]">
+            <thead>
+              <tr>
+                <th class="text-left">时间</th>
+                <th class="text-right">总请求</th>
+                <th class="text-right">成功</th>
+                <th class="text-right">失败</th>
+                <th class="text-right">成功率</th>
+                <th class="text-right">平均耗时(ms)</th>
+              </tr>
+            </thead>
+            <tbody id="trend-body"></tbody>
+          </table>
+          <div id="trend-empty" class="hidden table-empty">暂无趋势数据</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 class="title">模型分布</h3>
+        <div class="rounded-lg overflow-hidden bg-white overflow-x-auto">
+          <table class="geist-table min-w-[860px]">
+            <thead>
+              <tr>
+                <th class="text-left">模型</th>
+                <th class="text-right">请求数</th>
+                <th class="text-right">成功</th>
+                <th class="text-right">失败</th>
+                <th class="text-right">成功率</th>
+                <th class="text-right">平均耗时(ms)</th>
+              </tr>
+            </thead>
+            <tbody id="models-body"></tbody>
+          </table>
+          <div id="models-empty" class="hidden table-empty">暂无模型数据</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div id="app-footer"></div>
+
+  <script src="/static/common/js/admin-auth.js?v=0.3.1"></script>
+  <script src="/static/common/js/header.js?v=0.3.1"></script>
+  <script src="/static/common/js/footer.js?v=0.3.1"></script>
+  <script src="/static/common/js/toast.js"></script>
+  <script src="/static/admin/js/stats.js?v=0.3.1"></script>
+</body>
+
+</html>

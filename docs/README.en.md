@@ -63,6 +63,39 @@ docker compose up -d
 - **NSFW Enable**: one-click Unhinged for tokens (proxy or `cf_clearance` required)
 - **Config Management**: update system config online
 - **Cache Management**: view and clear media cache
+- **Conversation Management**: inspect continuation state and clear conversations
+- **Request Stats**: view 24h / 7d trend and model distribution (admin table)
+
+### Conversation Continuation
+
+- Optional request field: `conversation_id`
+- Optional request header: `X-Conversation-ID`
+- If both are provided and conflict, request body `conversation_id` takes precedence
+- Response returns `conversation_id` (JSON for non-stream, `X-Conversation-ID` header for stream)
+
+### Health Check
+
+- `GET /health`
+
+### Admin APIs (Conversation)
+
+- Python:
+  - `GET /v1/admin/conversations`
+  - `POST /v1/admin/conversations/clear`
+- Worker:
+  - `GET /api/conversations`
+  - `POST /api/conversations/clear`
+  - Legacy: `GET /v1/admin/conversations` / `POST /v1/admin/conversations/clear`
+
+### Admin APIs (Stats)
+
+- Python:
+  - `GET /v1/admin/stats/trend?window=24h|7d&bucket=hour|day`
+  - `GET /v1/admin/stats/models?window=24h|7d`
+- Worker:
+  - `GET /api/stats/trend?window=24h|7d&bucket=hour|day`
+  - `GET /api/stats/models?window=24h|7d`
+  - Legacy: `GET /v1/admin/stats` / `GET /v1/admin/stats/trend` / `GET /v1/admin/stats/models`
 
 <br>
 
@@ -143,6 +176,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `reasoning_effort` | string | Reasoning effort | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `temperature` | number | Sampling temperature | `0` ~ `2` |
 | `top_p` | number | Nucleus sampling | `0` ~ `1` |
+| `conversation_id` | string | Client conversation ID for real continuation | Optional |
 | `video_config` | object | **Video model only** | Supported: `grok-imagine-1.0-video` |
 | └─ `aspect_ratio` | string | Video aspect ratio | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`, `1280x720`, `720x1280`, `1792x1024`, `1024x1792`, `1024x1024` |
 | └─ `video_length` | integer | Video length (seconds) | `6`, `10`, `15` |
@@ -298,6 +332,8 @@ Config file: `data/config.toml`
 | **chat** | `concurrent` | Concurrency | Reverse interface concurrency limit. | `10` |
 |  | `timeout` | Timeout | Reverse request timeout (seconds). | `60` |
 |  | `stream_timeout` | Stream idle timeout | Stream idle timeout (seconds). | `60` |
+|  | `conversation_ttl` | Conversation TTL | Conversation state retention (seconds). | `72000` |
+|  | `max_conversations_per_token` | Max conversations per token | Keep at most N conversations per token; evict oldest by `updated_at` when overflow. | `100` |
 | **video** | `concurrent` | Concurrency | Reverse interface concurrency limit. | `10` |
 |  | `timeout` | Timeout | Reverse request timeout (seconds). | `60` |
 |  | `stream_timeout` | Stream idle timeout | Stream idle timeout (seconds). | `60` |

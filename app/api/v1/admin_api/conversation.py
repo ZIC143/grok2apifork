@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.auth import verify_app_key
 from app.services.grok.services.conversation import get_conversation_store
+from app.services.grok.services.request_stats import get_request_stats_store
 
 router = APIRouter()
 
@@ -26,3 +27,31 @@ async def clear_conversations(payload: dict):
         expired_only=bool(payload.get("expired_only")),
     )
     return {"status": "success", "deleted": deleted}
+
+
+@router.get("/stats/trend", dependencies=[Depends(verify_app_key)])
+async def request_stats_trend(
+    window: str = Query(default="24h"),
+    bucket: str = Query(default="hour"),
+):
+    window_map = {
+        "24h": 24 * 3600,
+        "7d": 7 * 24 * 3600,
+    }
+    window_sec = window_map.get(str(window).lower(), 24 * 3600)
+    bucket_value = "day" if str(bucket).lower() == "day" else "hour"
+    store = await get_request_stats_store()
+    data = await store.trend(window_sec=window_sec, bucket=bucket_value)
+    return {"status": "success", **data}
+
+
+@router.get("/stats/models", dependencies=[Depends(verify_app_key)])
+async def request_stats_models(window: str = Query(default="24h")):
+    window_map = {
+        "24h": 24 * 3600,
+        "7d": 7 * 24 * 3600,
+    }
+    window_sec = window_map.get(str(window).lower(), 24 * 3600)
+    store = await get_request_stats_store()
+    data = await store.model_distribution(window_sec=window_sec)
+    return {"status": "success", **data}

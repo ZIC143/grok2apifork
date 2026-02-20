@@ -39,6 +39,7 @@ export async function upsertConversation(
     full_hash?: string | null;
     updated_at: number;
     expires_at: number;
+    max_per_token?: number;
   },
 ): Promise<void> {
   await dbRun(
@@ -64,6 +65,22 @@ export async function upsertConversation(
       row.expires_at,
     ],
   );
+
+  const token = String(row.token ?? "").trim();
+  const maxPerToken = Math.max(1, Math.min(5000, Number(row.max_per_token ?? 0) || 0));
+  if (!token || maxPerToken <= 0) return;
+
+  const overflow = await dbAll<{ conversation_id: string }>(
+    db,
+    "SELECT conversation_id FROM conversations WHERE token = ? ORDER BY updated_at DESC LIMIT -1 OFFSET ?",
+    [token, maxPerToken],
+  );
+  if (!overflow.length) return;
+
+  const ids = overflow.map((x) => x.conversation_id).filter(Boolean);
+  if (!ids.length) return;
+  const placeholders = ids.map(() => "?").join(",");
+  await dbRun(db, `DELETE FROM conversations WHERE conversation_id IN (${placeholders})`, ids);
 }
 
 export async function deleteExpiredConversations(db: Env["DB"], nowMs: number): Promise<number> {

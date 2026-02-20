@@ -92,6 +92,8 @@ timeout = 60
 stream_timeout = 60
 # 会话状态存活时间（秒）
 conversation_ttl = 72000
+# 每个 Token 最大会话数
+max_conversations_per_token = 100
 
 [maintenance]
 # 后台清理执行间隔（秒）
