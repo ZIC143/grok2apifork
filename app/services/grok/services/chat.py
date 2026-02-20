@@ -97,6 +97,21 @@ def _is_search_tool_text(line: str) -> bool:
     return "[websearch]" in text or "[searchimage]" in text
 
 
+def _format_search_count(resp: Dict[str, Any], rollout_id: str = "") -> str:
+    web_results = resp.get("webSearchResults")
+    results = []
+    if isinstance(web_results, dict):
+        maybe = web_results.get("results")
+        if isinstance(maybe, list):
+            results = maybe
+    elif isinstance(web_results, list):
+        results = web_results
+    if not results:
+        return ""
+    prefix = f"[{rollout_id}] " if rollout_id else ""
+    return f"{prefix}📄 找到 {len(results)} 条结果"
+
+
 def _get_chat_semaphore() -> asyncio.Semaphore:
     global _CHAT_SEMAPHORE, _CHAT_SEM_VALUE
     value = max(1, int(get_config("chat.concurrent")))
@@ -468,7 +483,12 @@ class ChatService:
 
                 # 非流式
                 logger.debug(f"Processing non-stream response: model={model}")
-                collect_processor = CollectProcessor(model_name, token, show_search)
+                collect_processor = CollectProcessor(
+                    model_name,
+                    token,
+                    show_search,
+                    show_think,
+                )
                 result = await collect_processor.process(response)
                 try:
                     model_info = ModelService.get(model)
@@ -769,6 +789,20 @@ class StreamProcessor(proc_base.BaseProcessor):
                                     yield self._sse(f"![image]({original})\n")
                     continue
 
+                message_tag = str(resp.get("messageTag") or "")
+                if self.show_search:
+                    count_line = _format_search_count(resp, self.rollout_id)
+                    if count_line:
+                        if not self.show_think:
+                            yield self._sse(f"{count_line}\n")
+                        else:
+                            if not self.think_opened:
+                                yield self._sse("<think>\n")
+                                self.think_opened = True
+                            yield self._sse(f"{count_line}\n")
+                        if message_tag == "raw_function_result":
+                            continue
+
                 if (token := resp.get("token")) is not None:
                     if not token:
                         continue
@@ -830,13 +864,20 @@ class StreamProcessor(proc_base.BaseProcessor):
 class CollectProcessor(proc_base.BaseProcessor):
     """Non-stream response processor."""
 
-    def __init__(self, model: str, token: str = "", show_search: bool = True):
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        show_search: bool = True,
+        show_think: bool = True,
+    ):
         super().__init__(model, token)
         self.filter_tags = get_config("app.filter_tags")
         self.response_id: str = ""
         self.conversation_id: str = ""
         self.share_link_id: str = ""
         self.show_search = bool(show_search)
+        self.show_think = bool(show_think)
 
     def _filter_content(self, content: str) -> str:
         """Filter special tags in content."""
@@ -877,6 +918,8 @@ class CollectProcessor(proc_base.BaseProcessor):
         response_id = ""
         fingerprint = ""
         content = ""
+        thinking_content = ""
+        first_think_token = True
         idle_timeout = get_config("chat.stream_timeout")
 
         try:
@@ -899,6 +942,39 @@ class CollectProcessor(proc_base.BaseProcessor):
 
                 if (llm := resp.get("llmInfo")) and not fingerprint:
                     fingerprint = llm.get("modelHash", "")
+
+                rollout_id = str(resp.get("rolloutId") or "")
+                message_tag = str(resp.get("messageTag") or "")
+                if message_tag == "tool_usage_card" and self.show_search:
+                    if isinstance(resp.get("token"), str):
+                        line = extract_tool_text(resp.get("token"), rollout_id)
+                        if line:
+                            thinking_content += f"{line}\n"
+                    continue
+
+                if self.show_search:
+                    count_line = _format_search_count(resp, rollout_id)
+                    if count_line:
+                        thinking_content += f"{count_line}\n"
+                        if message_tag == "raw_function_result":
+                            continue
+
+                if isinstance(resp.get("token"), str):
+                    token_text = resp.get("token")
+                    is_thinking = bool(resp.get("isThinking"))
+                    filtered_token = self._filter_content(token_text)
+                    if not filtered_token:
+                        continue
+                    if is_thinking:
+                        if self.show_think:
+                            if first_think_token and "Thinking about" in filtered_token:
+                                first_think_token = False
+                                continue
+                            first_think_token = False
+                            thinking_content += filtered_token
+                    else:
+                        content += filtered_token
+                    continue
 
                 if mr := resp.get("modelResponse"):
                     response_id = mr.get("responseId", "")
@@ -987,6 +1063,9 @@ class CollectProcessor(proc_base.BaseProcessor):
             await self.close()
 
         content = self._filter_content(content)
+
+        if self.show_think and thinking_content.strip():
+            content = f"<think>\n{thinking_content.strip()}\n</think>\n{content}"
 
         return {
             "id": response_id,

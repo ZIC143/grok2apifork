@@ -1606,6 +1606,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
       messages?: any[];
       stream?: boolean;
       conversation_id?: string;
+      reasoning_effort?: string | null;
+      thinking?: boolean;
+      show_search?: boolean;
     };
 
     const headerConversationId = String(c.req.header("X-Conversation-ID") ?? "").trim();
@@ -1625,6 +1628,22 @@ openAiRoutes.post("/chat/completions", async (c) => {
       : [401, 429];
 
     const stream = Boolean(body.stream);
+    const reasoningEffort = body.reasoning_effort ? String(body.reasoning_effort).trim().toLowerCase() : null;
+    const requestThinking = typeof body.thinking === "boolean" ? body.thinking : null;
+    const requestShowSearch = typeof body.show_search === "boolean" ? body.show_search : null;
+    let effectiveShowThinking = settingsBundle.grok.show_thinking !== false;
+    if (requestThinking !== null) effectiveShowThinking = requestThinking;
+    if (reasoningEffort !== null) effectiveShowThinking = reasoningEffort !== "none";
+    const runtimeGrokSettings = {
+      ...settingsBundle.grok,
+      show_thinking: effectiveShowThinking,
+    };
+    const runtimeGlobalSettings = requestShowSearch === null
+      ? settingsBundle.global
+      : {
+          ...settingsBundle.global,
+          show_search: requestShowSearch,
+        };
     const maxRetry = 3;
     let lastErr: string | null = null;
 
@@ -1729,8 +1748,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
         if (stream) {
           const sse = createOpenAiStreamFromGrokNdjson(upstream, {
             cookie,
-            settings: settingsBundle.grok,
-            global: settingsBundle.global,
+            settings: runtimeGrokSettings,
+            global: runtimeGlobalSettings,
             origin,
             onFinish: async ({ status, duration, responseId, upstreamConversationId, shareLinkId }) => {
               let nextShare = shareLinkId;
@@ -1794,8 +1813,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
 
         const parsed = await parseOpenAiFromGrokNdjson(upstream, {
           cookie,
-          settings: settingsBundle.grok,
-          global: settingsBundle.global,
+          settings: runtimeGrokSettings,
+          global: runtimeGlobalSettings,
           origin,
           requestedModel,
         });
