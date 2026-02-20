@@ -1634,6 +1634,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
     let effectiveShowThinking = settingsBundle.grok.show_thinking !== false;
     if (requestThinking !== null) effectiveShowThinking = requestThinking;
     if (reasoningEffort !== null) effectiveShowThinking = reasoningEffort !== "none";
+    const isReasoning = effectiveShowThinking;
     const runtimeGrokSettings = {
       ...settingsBundle.grok,
       show_thinking: effectiveShowThinking,
@@ -1723,6 +1724,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           imgUris,
           ...(postId ? { postId } : {}),
           settings: runtimeGrokSettings,
+          isReasoning,
           ...(runtimeState?.responseId ? { parentResponseId: runtimeState.responseId } : {}),
         });
 

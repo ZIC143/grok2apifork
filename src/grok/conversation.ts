@@ -55,9 +55,10 @@ export function buildConversationPayload(args: {
   imgUris: string[];
   postId?: string;
   settings: GrokSettings;
+  isReasoning?: boolean;
   parentResponseId?: string;
 }): { payload: Record<string, unknown>; referer?: string; isVideoModel: boolean } {
-  const { requestModel, content, imgIds, imgUris, postId, settings, parentResponseId } = args;
+  const { requestModel, content, imgIds, imgUris, postId, settings, isReasoning, parentResponseId } = args;
   const cfg = getModelInfo(requestModel);
   const { grokModel, mode, isVideoModel } = toGrokModel(requestModel);
 
@@ -96,7 +97,7 @@ export function buildConversationPayload(args: {
       toolOverrides: {},
       enableSideBySide: true,
       sendFinalMetadata: true,
-      isReasoning: false,
+      isReasoning: Boolean(isReasoning),
       webpageUrls: [],
       disableTextFollowUps: true,
       responseMetadata: { requestModelDetails: { modelId: grokModel } },
