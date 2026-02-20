@@ -28,6 +28,8 @@ import { checkRateLimits } from "../grok/rateLimits";
 import {
   addRequestLog,
   clearRequestLogs,
+  getKeySummary,
+  getKeyTrend24h,
   getModelDistribution,
   getRequestLogs,
   getRequestTrend,
@@ -392,6 +394,26 @@ adminRoutes.get("/api/stats/models", requireAdminAuth, async (c) => {
     return c.json({ success: true, data: { window, items } });
   } catch (e) {
     return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "STATS_MODELS_ERROR"), 500);
+  }
+});
+
+adminRoutes.get("/api/stats/keys", requireAdminAuth, async (c) => {
+  try {
+    const window = String(c.req.query("window") ?? "24h").toLowerCase();
+    const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+    const items = await getKeySummary(c.env.DB, { windowMs });
+    return c.json({ success: true, data: { window, items } });
+  } catch (e) {
+    return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "STATS_KEYS_ERROR"), 500);
+  }
+});
+
+adminRoutes.get("/api/stats/keys/trend", requireAdminAuth, async (c) => {
+  try {
+    const items = await getKeyTrend24h(c.env.DB);
+    return c.json({ success: true, data: { window: "24h", bucket: "hour", items } });
+  } catch (e) {
+    return c.json(jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "STATS_KEYS_TREND_ERROR"), 500);
   }
 });
 

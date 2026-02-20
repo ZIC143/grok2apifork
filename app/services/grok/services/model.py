@@ -227,14 +227,14 @@ class ModelService:
     @classmethod
     def valid(cls, model_id: str) -> bool:
         """模型是否有效"""
-        return model_id in cls._map
+        return bool(str(model_id or "").strip())
 
     @classmethod
     def to_grok(cls, model_id: str) -> Tuple[str, str]:
         """转换为 Grok 参数"""
         model = cls.get(model_id)
         if not model:
-            raise ValidationException(f"Invalid model ID: {model_id}")
+            return str(model_id), "MODEL_MODE_FAST"
         return model.grok_model, model.model_mode
 
     @classmethod

@@ -92,6 +92,11 @@ def extract_tool_text(raw: str, rollout_id: str = "") -> str:
     return re.sub(r"<[^>]+>", "", raw, flags=re.DOTALL).strip()
 
 
+def _is_search_tool_text(line: str) -> bool:
+    text = str(line or "").strip().lower()
+    return "[websearch]" in text or "[searchimage]" in text
+
+
 def _get_chat_semaphore() -> asyncio.Semaphore:
     global _CHAT_SEMAPHORE, _CHAT_SEM_VALUE
     value = max(1, int(get_config("chat.concurrent")))
@@ -255,11 +260,9 @@ class GrokChatService:
     ):
         """OpenAI 兼容接口"""
         model_info = ModelService.get(model)
+        grok_model, mode = ModelService.to_grok(model)
         if not model_info:
-            raise ValidationException(f"Unknown model: {model}")
-
-        grok_model = model_info.grok_model
-        mode = model_info.model_mode
+            logger.info(f"Unknown model passthrough enabled: {model}")
         # 提取消息和附件
         message, file_attachments, image_attachments = MessageExtractor.extract(messages)
         logger.debug(
@@ -333,6 +336,7 @@ class ChatService:
             show_think = get_config("app.thinking")
         else:
             show_think = reasoning_effort != "none"
+        show_search = bool(get_config("app.show_search", True))
         is_stream = stream if stream is not None else get_config("app.stream")
         conversation_store = await get_conversation_store()
         client_conversation_id, state = await conversation_store.resolve(
@@ -406,7 +410,12 @@ class ChatService:
                 # 处理响应
                 if is_stream:
                     logger.debug(f"Processing stream response: model={model}")
-                    processor = StreamProcessor(model_name, token, show_think)
+                    processor = StreamProcessor(
+                        model_name,
+                        token,
+                        show_think,
+                        show_search,
+                    )
                     wrapped = wrap_stream_with_usage(
                         processor.process(response), token_mgr, token, model
                     )
@@ -459,7 +468,7 @@ class ChatService:
 
                 # 非流式
                 logger.debug(f"Processing non-stream response: model={model}")
-                collect_processor = CollectProcessor(model_name, token)
+                collect_processor = CollectProcessor(model_name, token, show_search)
                 result = await collect_processor.process(response)
                 try:
                     model_info = ModelService.get(model)
@@ -533,7 +542,13 @@ class ChatService:
 class StreamProcessor(proc_base.BaseProcessor):
     """Stream response processor."""
 
-    def __init__(self, model: str, token: str = "", show_think: bool = None):
+    def __init__(
+        self,
+        model: str,
+        token: str = "",
+        show_think: bool = None,
+        show_search: bool = True,
+    ):
         super().__init__(model, token)
         self.response_id: str = None
         self.conversation_id: str = ""
@@ -550,6 +565,7 @@ class StreamProcessor(proc_base.BaseProcessor):
         self._tool_usage_buffer = ""
 
         self.show_think = bool(show_think)
+        self.show_search = bool(show_search)
 
     def _filter_tool_card(self, token: str) -> str:
         if not token or not self.tool_usage_enabled:
@@ -569,6 +585,9 @@ class StreamProcessor(proc_base.BaseProcessor):
                 end_pos = end_idx + len(end_tag)
                 self._tool_usage_buffer += rest[:end_pos]
                 line = extract_tool_text(self._tool_usage_buffer, self.rollout_id)
+                if line:
+                    if _is_search_tool_text(line) and not self.show_search:
+                        line = ""
                 if line:
                     if output_parts and not output_parts[-1].endswith("\n"):
                         output_parts[-1] += "\n"
@@ -595,6 +614,9 @@ class StreamProcessor(proc_base.BaseProcessor):
             end_pos = end_idx + len(end_tag)
             raw_card = rest[start_idx:end_pos]
             line = extract_tool_text(raw_card, self.rollout_id)
+            if line:
+                if _is_search_tool_text(line) and not self.show_search:
+                    line = ""
             if line:
                 if output_parts and not output_parts[-1].endswith("\n"):
                     output_parts[-1] += "\n"
@@ -808,12 +830,13 @@ class StreamProcessor(proc_base.BaseProcessor):
 class CollectProcessor(proc_base.BaseProcessor):
     """Non-stream response processor."""
 
-    def __init__(self, model: str, token: str = ""):
+    def __init__(self, model: str, token: str = "", show_search: bool = True):
         super().__init__(model, token)
         self.filter_tags = get_config("app.filter_tags")
         self.response_id: str = ""
         self.conversation_id: str = ""
         self.share_link_id: str = ""
+        self.show_search = bool(show_search)
 
     def _filter_content(self, content: str) -> str:
         """Filter special tags in content."""
@@ -832,8 +855,9 @@ class CollectProcessor(proc_base.BaseProcessor):
             result = re.sub(
                 r"<xai:tool_usage_card[^>]*>.*?</xai:tool_usage_card>",
                 lambda match: (
-                    f"{extract_tool_text(match.group(0), rollout_id)}\n"
-                    if extract_tool_text(match.group(0), rollout_id)
+                    f"{_line}\n"
+                    if (_line := extract_tool_text(match.group(0), rollout_id))
+                    and (self.show_search or not _is_search_tool_text(_line))
                     else ""
                 ),
                 result,

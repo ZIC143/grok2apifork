@@ -82,6 +82,47 @@
           <div id="models-empty" class="hidden table-empty">暂无模型数据</div>
         </div>
       </div>
+
+      <div class="panel">
+        <h3 class="title">按 Key 统计</h3>
+        <div class="rounded-lg overflow-hidden bg-white overflow-x-auto">
+          <table class="geist-table min-w-[860px]">
+            <thead>
+              <tr>
+                <th class="text-left">Key</th>
+                <th class="text-right">请求数</th>
+                <th class="text-right">成功</th>
+                <th class="text-right">失败</th>
+                <th class="text-right">成功率</th>
+                <th class="text-right">平均耗时(ms)</th>
+              </tr>
+            </thead>
+            <tbody id="keys-body"></tbody>
+          </table>
+          <div id="keys-empty" class="hidden table-empty">暂无 Key 统计数据</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 class="title">按 Key 24h 趋势（按小时）</h3>
+        <div class="rounded-lg overflow-hidden bg-white overflow-x-auto">
+          <table class="geist-table min-w-[980px]">
+            <thead>
+              <tr>
+                <th class="text-left">时间</th>
+                <th class="text-left">Key</th>
+                <th class="text-right">请求数</th>
+                <th class="text-right">成功</th>
+                <th class="text-right">失败</th>
+                <th class="text-right">成功率</th>
+                <th class="text-right">平均耗时(ms)</th>
+              </tr>
+            </thead>
+            <tbody id="keys-trend-body"></tbody>
+          </table>
+          <div id="keys-trend-empty" class="hidden table-empty">暂无 Key 趋势数据</div>
+        </div>
+      </div>
     </div>
   </main>
 

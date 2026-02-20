@@ -34,7 +34,8 @@ const NUMERIC_FIELDS = new Set([
   'max_conversations_per_token',
   'cleanup_interval_sec',
   'log_retention_days',
-  'conversation_ttl_seconds'
+  'conversation_ttl_seconds',
+  'max_log_entries'
 ]);
 
 const LOCALE_MAP = {
@@ -49,6 +50,8 @@ const LOCALE_MAP = {
     "video_format": { title: "视频格式", desc: "默认生成的视频格式（html 或 url，url 为处理后的链接）。" },
     "log_retention_days": { title: "日志保留天数", desc: "请求日志文件自动清理保留天数。" },
     "conversation_ttl_seconds": { title: "会话TTL(秒)", desc: "会话上下文状态过期时间（秒）。" },
+    "max_log_entries": { title: "统计日志上限", desc: "请求统计日志最大保留条数，超出后自动淘汰最旧记录。" },
+    "show_search": { title: "显示搜索过程", desc: "是否在回复中展示搜索工具相关过程输出（与思维链开关独立）。" },
     "temporary": { title: "临时对话", desc: "是否默认启用临时对话模式。" },
     "disable_memory": { title: "禁用记忆", desc: "是否默认禁用 Grok 记忆功能。" },
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },

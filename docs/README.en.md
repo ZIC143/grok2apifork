@@ -64,7 +64,11 @@ docker compose up -d
 - **Config Management**: update system config online
 - **Cache Management**: view and clear media cache
 - **Conversation Management**: inspect continuation state and clear conversations
-- **Request Stats**: view 24h / 7d trend and model distribution (admin table)
+- **Request Stats**: view 24h / 7d trend, model distribution, per-key summary, and per-key 24h trend (admin tables)
+
+> New: unknown models are now fully passed through to upstream (no hard rejection at gateway layer), and passthrough model IDs are logged.
+
+> New: `app.max_log_entries` (request stats log cap) and `app.show_search` (search-process output toggle, independent of thinking output).
 
 ### Conversation Continuation
 
@@ -92,10 +96,14 @@ docker compose up -d
 - Python:
   - `GET /v1/admin/stats/trend?window=24h|7d&bucket=hour|day`
   - `GET /v1/admin/stats/models?window=24h|7d`
+  - `GET /v1/admin/stats/keys?window=24h|7d`
+  - `GET /v1/admin/stats/keys/trend`
 - Worker:
   - `GET /api/stats/trend?window=24h|7d&bucket=hour|day`
   - `GET /api/stats/models?window=24h|7d`
-  - Legacy: `GET /v1/admin/stats` / `GET /v1/admin/stats/trend` / `GET /v1/admin/stats/models`
+  - `GET /api/stats/keys?window=24h|7d`
+  - `GET /api/stats/keys/trend`
+  - Legacy: `GET /v1/admin/stats` / `GET /v1/admin/stats/trend` / `GET /v1/admin/stats/models` / `GET /v1/admin/stats/keys` / `GET /v1/admin/stats/keys/trend`
 
 <br>
 

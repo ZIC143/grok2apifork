@@ -141,6 +141,7 @@ export function createOpenAiStreamFromGrokNdjson(
     .map((t) => t.trim())
     .filter(Boolean);
   const showThinking = settings.show_thinking !== false;
+  const showSearch = global.show_search !== false;
 
   const firstTimeoutMs = Math.max(0, (settings.stream_first_response_timeout ?? 30) * 1000);
   const chunkTimeoutMs = Math.max(0, (settings.stream_chunk_timeout ?? 120) * 1000);
@@ -374,7 +375,7 @@ export function createOpenAiStreamFromGrokNdjson(
 
             if (grok.toolUsageCardId && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
               if (currentIsThinking) {
-                if (showThinking) {
+                if (showSearch) {
                   let appended = "";
                   for (const r of grok.webSearchResults.results) {
                     const title = typeof r.title === "string" ? r.title : "";
@@ -383,7 +384,8 @@ export function createOpenAiStreamFromGrokNdjson(
                     appended += `\n- [${title}](${url} \"${preview}\")`;
                   }
                   token += `${appended}\n`;
-                } else {
+                }
+                if (!showThinking && !showSearch) {
                   continue;
                 }
               } else {

@@ -512,6 +512,20 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
 
     logger.debug(f"Chat request: model={request.model}, stream={request.stream}")
     started_at = time.time()
+    auth_header = str(http_request.headers.get("authorization") or "").strip()
+    raw_key = ""
+    if auth_header.lower().startswith("bearer "):
+        raw_key = auth_header[7:].strip()
+    configured_key = str(get_config("app.api_key") or "").strip()
+    if raw_key and configured_key and raw_key == configured_key:
+        key_name = "default"
+    elif raw_key:
+        if len(raw_key) <= 10:
+            key_name = f"key:{raw_key}"
+        else:
+            key_name = f"key:{raw_key[:6]}...{raw_key[-4:]}"
+    else:
+        key_name = "anonymous"
 
     async def _record_stat(status: int):
         stats_store = await get_request_stats_store()
@@ -519,6 +533,7 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
             model=request.model,
             status=status,
             duration_ms=(time.time() - started_at) * 1000,
+            key_name=key_name,
         )
 
     try:

@@ -83,9 +83,13 @@ docker compose up -d
 - **配置管理**：在线修改系统配置
 - **缓存管理**：查看和清理媒体缓存
 - **会话管理**：查看会话续接状态并支持后台清理
-- **请求统计**：查看 24h / 7d 请求趋势与模型分布（后台表格）
+- **请求统计**：查看 24h / 7d 请求趋势、模型分布、按 Key 汇总与按 Key 24h 趋势（后台表格）
 
 > 新增：支持真实会话续接（`conversation_id`）、跨账号 `share/clone` 续接。
+
+> 新增：未知模型默认全量透传至上游（不再在网关层硬拦截），并在日志中记录透传模型名。
+
+> 新增：`app.max_log_entries`（请求统计日志保留上限）与 `app.show_search`（搜索过程输出开关，独立于 thinking）。
 
 ### 会话续接与跨账号续接
 
@@ -113,10 +117,14 @@ docker compose up -d
 - Python 管理接口：
   - `GET /v1/admin/stats/trend?window=24h|7d&bucket=hour|day`
   - `GET /v1/admin/stats/models?window=24h|7d`
+  - `GET /v1/admin/stats/keys?window=24h|7d`
+  - `GET /v1/admin/stats/keys/trend`
 - Worker 管理接口：
   - `GET /api/stats/trend?window=24h|7d&bucket=hour|day`
   - `GET /api/stats/models?window=24h|7d`
-  - Legacy: `GET /v1/admin/stats` / `GET /v1/admin/stats/trend` / `GET /v1/admin/stats/models`
+  - `GET /api/stats/keys?window=24h|7d`
+  - `GET /api/stats/keys/trend`
+  - Legacy: `GET /v1/admin/stats` / `GET /v1/admin/stats/trend` / `GET /v1/admin/stats/models` / `GET /v1/admin/stats/keys` / `GET /v1/admin/stats/keys/trend`
 
 ### Worker 迁移
 

@@ -15,6 +15,8 @@ export interface GlobalSettings {
   log_retention_days?: number;
   conversation_ttl_seconds?: number;
   conversation_max_per_token?: number;
+  max_log_entries?: number;
+  show_search?: boolean;
 }
 
 export interface GrokSettings {
@@ -54,6 +56,8 @@ const DEFAULTS: SettingsBundle = {
     log_retention_days: 7,
     conversation_ttl_seconds: 72000,
     conversation_max_per_token: 100,
+    max_log_entries: 1000,
+    show_search: true,
   },
   grok: {
     api_key: "",

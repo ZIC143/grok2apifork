@@ -16,7 +16,7 @@ import { createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { getDynamicHeaders } from "../grok/headers";
 import { checkRateLimits } from "../grok/rateLimits";
-import { addRequestLog, getModelDistribution, getRequestTrend } from "../repo/logs";
+import { addRequestLog, getKeySummary, getKeyTrend24h, getModelDistribution, getRequestTrend } from "../repo/logs";
 import {
   addTokens,
   applyCooldown,
@@ -138,6 +138,8 @@ function toLegacyConfig(settings: Awaited<ReturnType<typeof getSettings>>): Reco
       log_retention_days: settings.global.log_retention_days ?? 7,
       conversation_ttl_seconds: settings.global.conversation_ttl_seconds ?? 72000,
       conversation_max_per_token: settings.global.conversation_max_per_token ?? 100,
+      max_log_entries: settings.global.max_log_entries ?? 1000,
+      show_search: settings.global.show_search !== false,
       temporary: settings.grok.temporary ?? false,
       dynamic_statsig: settings.grok.dynamic_statsig ?? true,
       filter_tags: settings.grok.filtered_tags ?? "",
@@ -1073,6 +1075,10 @@ openAiRoutes.post("/admin/config", async (c) => {
     globalConfig.conversation_ttl_seconds = app.conversation_ttl_seconds;
   if (typeof app.conversation_max_per_token === "number")
     globalConfig.conversation_max_per_token = app.conversation_max_per_token;
+  if (typeof app.max_log_entries === "number")
+    globalConfig.max_log_entries = app.max_log_entries;
+  if (typeof app.show_search === "boolean")
+    globalConfig.show_search = app.show_search;
 
   const grokConfig: Record<string, unknown> = {};
   if (typeof app.api_key === "string") grokConfig.api_key = app.api_key;
@@ -1447,6 +1453,24 @@ openAiRoutes.get("/admin/stats/models", async (c) => {
   return c.json({ status: "success", window, items });
 });
 
+openAiRoutes.get("/admin/stats/keys", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+
+  const window = String(c.req.query("window") ?? "24h").toLowerCase();
+  const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
+  const items = await getKeySummary(c.env.DB, { windowMs });
+  return c.json({ status: "success", window, items });
+});
+
+openAiRoutes.get("/admin/stats/keys/trend", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+
+  const items = await getKeyTrend24h(c.env.DB);
+  return c.json({ status: "success", window: "24h", bucket: "hour", items });
+});
+
 openAiRoutes.get("/admin/stats", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
@@ -1455,9 +1479,11 @@ openAiRoutes.get("/admin/stats", async (c) => {
   const bucket = String(c.req.query("bucket") ?? "hour").toLowerCase() === "day" ? "day" : "hour";
   const windowMs = window === "7d" ? 7 * 24 * 3600 * 1000 : 24 * 3600 * 1000;
 
-  const [trend, models] = await Promise.all([
+  const [trend, models, keySummary, keyTrend24h] = await Promise.all([
     getRequestTrend(c.env.DB, { windowMs, bucket }),
     getModelDistribution(c.env.DB, { windowMs }),
+    getKeySummary(c.env.DB, { windowMs }),
+    getKeyTrend24h(c.env.DB),
   ]);
 
   return c.json({
@@ -1467,6 +1493,8 @@ openAiRoutes.get("/admin/stats", async (c) => {
       bucket,
       trend,
       models,
+      key_summary: keySummary,
+      key_trend_24h: keyTrend24h,
     },
   });
 });
@@ -1567,6 +1595,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
   const start = Date.now();
   const ip = getClientIp(c.req.raw);
   const keyName = c.get("apiAuth").name ?? "Unknown";
+  let maxLogEntries = 1000;
 
   const origin = new URL(c.req.url).origin;
 
@@ -1584,10 +1613,12 @@ openAiRoutes.post("/chat/completions", async (c) => {
     requestedModel = String(body.model ?? "");
     if (!requestedModel) return c.json(openAiError("Missing 'model'", "missing_model"), 400);
     if (!Array.isArray(body.messages)) return c.json(openAiError("Missing 'messages'", "missing_messages"), 400);
-    if (!isValidModel(requestedModel))
-      return c.json(openAiError(`Model '${requestedModel}' not supported`, "model_not_supported"), 400);
+    if (!isValidModel(requestedModel)) {
+      console.info(`Unknown model passthrough enabled: ${requestedModel}`);
+    }
 
     const settingsBundle = await getSettings(c.env);
+    maxLogEntries = Number(settingsBundle.global.max_log_entries ?? 1000) || 1000;
 
     const retryCodes = Array.isArray(settingsBundle.grok.retry_status_codes)
       ? settingsBundle.grok.retry_status_codes
@@ -1651,8 +1682,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
       }
 
       const { content, images } = extractContent(body.messages as any);
-      const cfg = MODEL_CONFIG[requestedModel]!;
-      const isVideoModel = Boolean(cfg.is_video_model);
+      const cfg = MODEL_CONFIG[requestedModel];
+      const isVideoModel = Boolean(cfg?.is_video_model);
       const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
 
       try {
@@ -1744,7 +1775,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
                 key_name: keyName,
                 token_suffix: jwt.slice(-6),
                 error: status === 200 ? "" : "stream_error",
-              });
+              }, { maxEntries: maxLogEntries });
             },
           });
 
@@ -1815,7 +1846,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           key_name: keyName,
           token_suffix: jwt.slice(-6),
           error: "",
-        });
+        }, { maxEntries: maxLogEntries });
 
         return c.json(json);
       } catch (e) {
@@ -1836,7 +1867,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
       key_name: keyName,
       token_suffix: "",
       error: lastErr ?? "unknown_error",
-    });
+    }, { maxEntries: maxLogEntries });
 
     return c.json(openAiError(lastErr ?? "Upstream error", "upstream_error"), 500);
   } catch (e) {
@@ -1849,7 +1880,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
       key_name: keyName,
       token_suffix: "",
       error: e instanceof Error ? e.message : String(e),
-    });
+    }, { maxEntries: maxLogEntries });
     return c.json(openAiError("Internal error", "internal_error"), 500);
   }
 });

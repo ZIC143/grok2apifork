@@ -55,3 +55,22 @@ async def request_stats_models(window: str = Query(default="24h")):
     store = await get_request_stats_store()
     data = await store.model_distribution(window_sec=window_sec)
     return {"status": "success", **data}
+
+
+@router.get("/stats/keys", dependencies=[Depends(verify_app_key)])
+async def request_stats_keys(window: str = Query(default="24h")):
+    window_map = {
+        "24h": 24 * 3600,
+        "7d": 7 * 24 * 3600,
+    }
+    window_sec = window_map.get(str(window).lower(), 24 * 3600)
+    store = await get_request_stats_store()
+    data = await store.key_summary(window_sec=window_sec)
+    return {"status": "success", **data}
+
+
+@router.get("/stats/keys/trend", dependencies=[Depends(verify_app_key)])
+async def request_stats_keys_trend():
+    store = await get_request_stats_store()
+    data = await store.key_trend_24h()
+    return {"status": "success", **data}
