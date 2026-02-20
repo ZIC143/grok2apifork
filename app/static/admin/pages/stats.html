@@ -40,7 +40,37 @@
           <option value="hour" selected>按小时</option>
           <option value="day">按天</option>
         </select>
+        <label class="text-sm text-[var(--accents-5)]">Key筛选</label>
+        <select id="key-filter" class="geist-input h-[34px] w-[220px]">
+          <option value="">全部 Key</option>
+        </select>
         <button id="btn-refresh" class="geist-button-outline">刷新</button>
+        <button id="btn-export-csv" class="geist-button-outline">导出 CSV</button>
+        <button id="btn-export-json" class="geist-button-outline">导出 JSON</button>
+        <button id="btn-copy-table" class="geist-button-outline">复制表格</button>
+        <label class="inline-flex items-center gap-2 text-sm text-[var(--accents-5)] select-none">
+          <input id="export-visible-only" type="checkbox" class="h-4 w-4" checked>
+          仅导出当前可见数据
+        </label>
+      </div>
+
+      <div class="stats-overview-grid">
+        <div class="panel stat-card">
+          <div class="stat-label">总请求</div>
+          <div id="ov-total" class="stat-value">-</div>
+        </div>
+        <div class="panel stat-card">
+          <div class="stat-label">成功率</div>
+          <div id="ov-success-rate" class="stat-value">-</div>
+        </div>
+        <div class="panel stat-card">
+          <div class="stat-label">平均耗时(ms)</div>
+          <div id="ov-avg-latency" class="stat-value">-</div>
+        </div>
+        <div class="panel stat-card">
+          <div class="stat-label">失败请求</div>
+          <div id="ov-errors" class="stat-value">-</div>
+        </div>
       </div>
 
       <div class="panel">

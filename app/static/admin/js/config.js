@@ -181,6 +181,28 @@ const SECTION_DESCRIPTIONS = {
 
 const SECTION_ORDER = new Map(Object.keys(LOCALE_MAP).map((key, index) => [key, index]));
 
+const FIELD_ORDER = {
+  app: new Map([
+    ['api_key', 0],
+    ['app_key', 1],
+    ['public_enabled', 2],
+    ['public_key', 3],
+    ['app_url', 4],
+    ['image_format', 5],
+    ['video_format', 6],
+    ['show_search', 7],
+    ['thinking', 8],
+    ['stream', 9],
+    ['temporary', 10],
+    ['disable_memory', 11],
+    ['dynamic_statsig', 12],
+    ['filter_tags', 13],
+    ['conversation_ttl_seconds', 14],
+    ['max_log_entries', 15],
+    ['log_retention_days', 16],
+  ]),
+};
+
 function getText(section, key) {
   if (LOCALE_MAP[section] && LOCALE_MAP[section][key]) {
     return LOCALE_MAP[section][key];
@@ -350,7 +372,8 @@ function renderConfig(data) {
   sections.forEach(section => {
     const items = data[section];
     const localeSection = LOCALE_MAP[section];
-    const keyOrder = localeSection ? new Map(Object.keys(localeSection).map((k, i) => [k, i])) : null;
+    const keyOrder = FIELD_ORDER[section]
+      || (localeSection ? new Map(Object.keys(localeSection).map((k, i) => [k, i])) : null);
 
     const allKeys = sortByOrder(Object.keys(items), keyOrder);
 
