@@ -790,16 +790,13 @@ class StreamProcessor(proc_base.BaseProcessor):
                     continue
 
                 message_tag = str(resp.get("messageTag") or "")
-                if self.show_search:
+                if self.show_search and self.show_think:
                     count_line = _format_search_count(resp, self.rollout_id)
                     if count_line:
-                        if not self.show_think:
-                            yield self._sse(f"{count_line}\n")
-                        else:
-                            if not self.think_opened:
-                                yield self._sse("<think>\n")
-                                self.think_opened = True
-                            yield self._sse(f"{count_line}\n")
+                        if not self.think_opened:
+                            yield self._sse("<think>\n")
+                            self.think_opened = True
+                        yield self._sse(f"{count_line}\n")
                         if message_tag == "raw_function_result":
                             continue
 
@@ -945,14 +942,14 @@ class CollectProcessor(proc_base.BaseProcessor):
 
                 rollout_id = str(resp.get("rolloutId") or "")
                 message_tag = str(resp.get("messageTag") or "")
-                if message_tag == "tool_usage_card" and self.show_search:
+                if message_tag == "tool_usage_card" and self.show_search and self.show_think:
                     if isinstance(resp.get("token"), str):
                         line = extract_tool_text(resp.get("token"), rollout_id)
                         if line:
                             thinking_content += f"{line}\n"
                     continue
 
-                if self.show_search:
+                if self.show_search and self.show_think:
                     count_line = _format_search_count(resp, rollout_id)
                     if count_line:
                         thinking_content += f"{count_line}\n"

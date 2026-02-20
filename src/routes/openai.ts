@@ -1722,14 +1722,14 @@ openAiRoutes.post("/chat/completions", async (c) => {
           imgIds,
           imgUris,
           ...(postId ? { postId } : {}),
-          settings: settingsBundle.grok,
+          settings: runtimeGrokSettings,
           ...(runtimeState?.responseId ? { parentResponseId: runtimeState.responseId } : {}),
         });
 
         const upstream = await sendConversationRequest({
           payload,
           cookie,
-          settings: settingsBundle.grok,
+          settings: runtimeGrokSettings,
           ...(referer ? { referer } : {}),
           ...(runtimeState?.upstreamConversationId
             ? { upstreamConversationId: runtimeState.upstreamConversationId }

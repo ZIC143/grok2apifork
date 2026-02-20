@@ -209,6 +209,8 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | array | 消息列表 | 见下方消息格式 |
 | `stream` | boolean | 是否开启流式输出 | `true`, `false` |
 | `reasoning_effort` | string | 推理强度 | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `thinking` | boolean | 是否显示思考过程（请求级覆盖） | `true`, `false` |
+| `show_search` | boolean | 是否显示搜索过程（请求级覆盖） | `true`, `false` |
 | `temperature` | number | 采样温度 | `0` ~ `2` |
 | `top_p` | number | nucleus 采样 | `0` ~ `1` |
 | `video_config` | object | **视频模型专用配置对象** | 支持：`grok-imagine-1.0-video` |
@@ -241,9 +243,37 @@ curl http://localhost:8000/v1/chat/completions \
 
 - `image_url/input_audio/file` 仅支持 URL 或 Data URI（`data:<mime>;base64,...`），裸 base64 会报错。
 - `reasoning_effort`：`none` 表示不输出思考，其他值都会输出思考内容。
+- `thinking`：请求级思考开关；若同时传 `reasoning_effort`，以 `reasoning_effort` 计算结果为准。
+- `show_search`：请求级搜索过程开关；当前行为与 `grok2api_new-main` 对齐，搜索过程展示依赖 `thinking=true` 且 `show_search=true`。
 - `grok-imagine-1.0-edit` 必须提供图片，多图默认取最后一张与最后一个文本。
 - `grok-imagine-1.0-video` 支持文生视频与图生视频（通过 `image_url` 传参考图）。
 - 除上述外的其他参数将自动丢弃并忽略。
+
+### Thinking / 搜索过程验收清单
+
+以下 4 组建议用于回归验证（Python/Worker 均应一致）：
+
+1. `thinking=true, show_search=true, stream=true`
+  - 预期：输出 `<think>...</think>`，且包含 `🔍 搜索: ...` 与 `📄 找到 N 条结果`。
+2. `thinking=true, show_search=false, stream=true`
+  - 预期：输出 `<think>...</think>`，不展示搜索查询与结果计数。
+3. `thinking=false, show_search=true, stream=true`
+  - 预期：不展示 thinking/search 过程（与 `grok2api_new-main` 对齐）。
+4. `thinking=true, show_search=true, stream=false`
+  - 预期：非流式正文前有 `<think>...</think>`，且包含搜索查询与结果计数。
+
+可使用脚本自动验收：
+
+```bash
+python scripts/verify_think_search.py
+```
+
+可选环境变量：
+
+- `BASE_URL`（默认 `http://127.0.0.1:8000`）
+- `API_KEY`（如启用鉴权）
+- `MODEL`（默认 `grok-4.1-thinking`）
+- `REQUEST_TIMEOUT`（默认 `120` 秒）
 
 <br>
 

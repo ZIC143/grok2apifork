@@ -182,6 +182,8 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages` | array | Message list | See message format below |
 | `stream` | boolean | Enable streaming | `true`, `false` |
 | `reasoning_effort` | string | Reasoning effort | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `thinking` | boolean | Show thinking process (request-level override) | `true`, `false` |
+| `show_search` | boolean | Show search process (request-level override) | `true`, `false` |
 | `temperature` | number | Sampling temperature | `0` ~ `2` |
 | `top_p` | number | Nucleus sampling | `0` ~ `1` |
 | `conversation_id` | string | Client conversation ID for real continuation | Optional |
@@ -215,9 +217,37 @@ curl http://localhost:8000/v1/chat/completions \
 
 - `image_url/input_audio/file` only supports URL or Data URI (`data:<mime>;base64,...`); raw base64 will be rejected.
 - `reasoning_effort`: `none` disables thinking output; any other value enables it.
+- `thinking`: request-level thinking toggle. If both `thinking` and `reasoning_effort` are provided, `reasoning_effort` takes precedence.
+- `show_search`: request-level search-process toggle. Current behavior is aligned with `grok2api_new-main` (search process is shown only when `thinking=true` and `show_search=true`).
 - `grok-imagine-1.0-edit` requires an image; if multiple are provided, the last image and last text are used.
 - `grok-imagine-1.0-video` supports text-to-video and image-to-video via `image_url`.
 - Any other parameters will be discarded and ignored.
+
+### Thinking/Search Acceptance Checklist
+
+Use these 4 cases for regression checks (Python and Worker should be consistent):
+
+1. `thinking=true, show_search=true, stream=true`
+  - Expect `<think>...</think>` and both `🔍 搜索: ...` + `📄 找到 N 条结果` lines.
+2. `thinking=true, show_search=false, stream=true`
+  - Expect `<think>...</think>` without search query/result-count lines.
+3. `thinking=false, show_search=true, stream=true`
+  - Expect no thinking/search process output (aligned with `grok2api_new-main`).
+4. `thinking=true, show_search=true, stream=false`
+  - Expect non-stream content prefixed with `<think>...</think>`, including search query and result count.
+
+You can run the automated checker:
+
+```bash
+python scripts/verify_think_search.py
+```
+
+Optional env vars:
+
+- `BASE_URL` (default: `http://127.0.0.1:8000`)
+- `API_KEY` (if auth is enabled)
+- `MODEL` (default: `grok-4.1-thinking`)
+- `REQUEST_TIMEOUT` (default: `120` seconds)
 
 <br>
 

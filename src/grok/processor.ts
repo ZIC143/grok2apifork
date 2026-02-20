@@ -597,17 +597,6 @@ export async function parseOpenAiFromGrokNdjson(
       break;
     }
 
-    const modelResp = grok.modelResponse;
-    if (!modelResp) continue;
-    if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
-    if (typeof modelResp.responseId === "string" && modelResp.responseId) responseId = modelResp.responseId;
-    if (typeof modelResp.conversationId === "string" && modelResp.conversationId)
-      upstreamConversationId = modelResp.conversationId;
-    if (typeof modelResp.shareLinkId === "string" && modelResp.shareLinkId) shareLinkId = modelResp.shareLinkId;
-
-    if (typeof modelResp.model === "string" && modelResp.model) model = modelResp.model;
-    if (typeof modelResp.message === "string") content = modelResp.message;
-
     const token = typeof grok.token === "string" ? grok.token : "";
     const isThinking = Boolean(grok.isThinking);
     const messageTag = String(grok.messageTag ?? "");
@@ -654,6 +643,17 @@ export async function parseOpenAiFromGrokNdjson(
       }
     }
 
+    const modelResp = grok.modelResponse;
+    if (!modelResp) continue;
+    if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
+    if (typeof modelResp.responseId === "string" && modelResp.responseId) responseId = modelResp.responseId;
+    if (typeof modelResp.conversationId === "string" && modelResp.conversationId)
+      upstreamConversationId = modelResp.conversationId;
+    if (typeof modelResp.shareLinkId === "string" && modelResp.shareLinkId) shareLinkId = modelResp.shareLinkId;
+
+    if (typeof modelResp.model === "string" && modelResp.model) model = modelResp.model;
+    if (typeof modelResp.message === "string") content = modelResp.message;
+
     const rawUrls = modelResp.generatedImageUrls;
     const urls = normalizeGeneratedAssetUrls(rawUrls);
     if (urls.length) {
@@ -668,8 +668,8 @@ export async function parseOpenAiFromGrokNdjson(
     // If upstream emits placeholder/empty generatedImageUrls in intermediate frames, keep scanning.
     if (Array.isArray(rawUrls)) continue;
 
-    // For normal chat replies, the first modelResponse is enough.
-    break;
+    // For normal chat replies keep scanning to aggregate thinking/search lines.
+    continue;
   }
 
   if (showThinking && thinkingContent.trim()) {
