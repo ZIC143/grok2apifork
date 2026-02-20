@@ -6,8 +6,14 @@ let filterToken = "";
 
 const byId = (id) => document.getElementById(id);
 
+function toEpochSec(ts) {
+  const n = Number(ts || 0);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n >= 1e12 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
 function fmtTs(sec) {
-  const n = Number(sec || 0);
+  const n = toEpochSec(sec);
   if (!Number.isFinite(n) || n <= 0) return "-";
   return new Date(n * 1000).toLocaleString("zh-CN", { hour12: false });
 }
@@ -104,7 +110,7 @@ async function loadConversations() {
 
     const rows = items
       .map((it) => {
-        const expired = Number(it.expires_at || 0) <= Math.floor(Date.now() / 1000);
+        const expired = toEpochSec(it.expires_at) <= Math.floor(Date.now() / 1000);
         return `
           <tr>
             <td class="mono">${it.conversation_id || "-"}</td>

@@ -67,9 +67,18 @@ export async function upsertConversation(
 }
 
 export async function deleteExpiredConversations(db: Env["DB"], nowMs: number): Promise<number> {
-  const rows = await dbAll<{ conversation_id: string }>(db, "SELECT conversation_id FROM conversations WHERE expires_at <= ?", [nowMs]);
+  const nowSec = Math.floor(nowMs / 1000);
+  const rows = await dbAll<{ conversation_id: string }>(
+    db,
+    "SELECT conversation_id FROM conversations WHERE (expires_at >= 1000000000000 AND expires_at <= ?) OR (expires_at > 0 AND expires_at < 1000000000000 AND expires_at <= ?)",
+    [nowMs, nowSec],
+  );
   if (!rows.length) return 0;
-  await dbRun(db, "DELETE FROM conversations WHERE expires_at <= ?", [nowMs]);
+  await dbRun(
+    db,
+    "DELETE FROM conversations WHERE (expires_at >= 1000000000000 AND expires_at <= ?) OR (expires_at > 0 AND expires_at < 1000000000000 AND expires_at <= ?)",
+    [nowMs, nowSec],
+  );
   return rows.length;
 }
 

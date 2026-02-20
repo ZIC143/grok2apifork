@@ -37,6 +37,7 @@ import {
 import { deleteCacheRow, deleteCacheRows, getCacheSizeBytes, listCacheRowsByType, listOldestRows, type CacheType } from "../repo/cache";
 import type { ApiAuthInfo } from "../auth";
 import { resolveConversation, saveConversationState } from "../grok/conversationState";
+import { normalizeEpochSeconds } from "../utils/time";
 
 function openAiError(message: string, code: string): Record<string, unknown> {
   return { error: { message, type: "invalid_request_error", code } };
@@ -1407,13 +1408,18 @@ openAiRoutes.get("/admin/conversations", async (c) => {
   const offset = Math.max(0, Number(c.req.query("offset") ?? 0));
   const token = String(c.req.query("token") ?? "").trim();
   const data = await listConversations(c.env.DB, { limit, offset, token });
+  const items = data.items.map((item) => ({
+    ...item,
+    updated_at: normalizeEpochSeconds(item.updated_at),
+    expires_at: normalizeEpochSeconds(item.expires_at),
+  }));
   return c.json({
     status: "success",
     total: data.total,
-    items: data.items,
+    items,
     offset,
     limit,
-    has_more: offset + data.items.length < data.total,
+    has_more: offset + items.length < data.total,
   });
 });
 

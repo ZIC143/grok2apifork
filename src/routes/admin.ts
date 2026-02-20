@@ -40,6 +40,7 @@ import {
   deleteExpiredConversations,
   listConversations,
 } from "../repo/conversations";
+import { normalizeEpochSeconds } from "../utils/time";
 
 function jsonError(message: string, code: string): Record<string, unknown> {
   return { error: message, code };
@@ -563,14 +564,19 @@ adminRoutes.get("/api/conversations", requireAdminAuth, async (c) => {
     const offset = Math.max(0, Number(c.req.query("offset") ?? 0));
     const token = String(c.req.query("token") ?? "").trim();
     const data = await listConversations(c.env.DB, { limit, offset, token });
+    const items = data.items.map((item) => ({
+      ...item,
+      updated_at: normalizeEpochSeconds(item.updated_at),
+      expires_at: normalizeEpochSeconds(item.expires_at),
+    }));
     return c.json({
       success: true,
       data: {
         total: data.total,
-        items: data.items,
+        items,
         offset,
         limit,
-        has_more: offset + data.items.length < data.total,
+        has_more: offset + items.length < data.total,
       },
     });
   } catch (e) {
