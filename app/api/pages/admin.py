@@ -27,6 +27,11 @@ async def admin_cache():
     return FileResponse(STATIC_DIR / "admin/pages/cache.html")
 
 
+@router.get("/admin/conversation", include_in_schema=False)
+async def admin_conversation():
+    return FileResponse(STATIC_DIR / "admin/pages/conversation.html")
+
+
 @router.get("/admin/token", include_in_schema=False)
 async def admin_token():
     return FileResponse(STATIC_DIR / "admin/pages/token.html")

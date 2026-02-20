@@ -4,7 +4,13 @@ import type { Env } from "../env";
 import { requireApiAuth } from "../auth";
 import { getSettings, normalizeCfCookie, saveSettings } from "../settings";
 import { isValidModel, MODEL_CONFIG } from "../grok/models";
-import { extractContent, buildConversationPayload, sendConversationRequest } from "../grok/conversation";
+import {
+  extractContent,
+  buildConversationPayload,
+  cloneShareLink,
+  createShareLink,
+  sendConversationRequest,
+} from "../grok/conversation";
 import { uploadImage } from "../grok/upload";
 import { createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
@@ -22,8 +28,15 @@ import {
   updateTokenNote,
   updateTokenTags,
 } from "../repo/tokens";
+import {
+  deleteConversationById,
+  deleteConversationsByToken,
+  deleteExpiredConversations,
+  listConversations,
+} from "../repo/conversations";
 import { deleteCacheRow, deleteCacheRows, getCacheSizeBytes, listCacheRowsByType, listOldestRows, type CacheType } from "../repo/cache";
 import type { ApiAuthInfo } from "../auth";
+import { resolveConversation, saveConversationState } from "../grok/conversationState";
 
 function openAiError(message: string, code: string): Record<string, unknown> {
   return { error: { message, type: "invalid_request_error", code } };
@@ -121,6 +134,8 @@ function toLegacyConfig(settings: Awaited<ReturnType<typeof getSettings>>): Reco
       public_key: settings.global.public_key ?? "",
       app_url: settings.global.base_url ?? "",
       image_format: settings.global.image_mode ?? "url",
+      log_retention_days: settings.global.log_retention_days ?? 7,
+      conversation_ttl_seconds: settings.global.conversation_ttl_seconds ?? 72000,
       temporary: settings.grok.temporary ?? false,
       dynamic_statsig: settings.grok.dynamic_statsig ?? true,
       filter_tags: settings.grok.filtered_tags ?? "",
@@ -1051,6 +1066,9 @@ openAiRoutes.post("/admin/config", async (c) => {
   if (typeof app.app_key === "string") globalConfig.admin_password = app.app_key;
   if (typeof app.public_enabled === "boolean") globalConfig.public_enabled = app.public_enabled;
   if (typeof app.public_key === "string") globalConfig.public_key = app.public_key;
+  if (typeof app.log_retention_days === "number") globalConfig.log_retention_days = app.log_retention_days;
+  if (typeof app.conversation_ttl_seconds === "number")
+    globalConfig.conversation_ttl_seconds = app.conversation_ttl_seconds;
 
   const grokConfig: Record<string, unknown> = {};
   if (typeof app.api_key === "string") grokConfig.api_key = app.api_key;
@@ -1382,6 +1400,49 @@ openAiRoutes.post("/admin/cache/online/clear", async (c) => {
   }
 });
 
+openAiRoutes.get("/admin/conversations", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+  const limit = Math.max(1, Math.min(2000, Number(c.req.query("limit") ?? 100)));
+  const offset = Math.max(0, Number(c.req.query("offset") ?? 0));
+  const token = String(c.req.query("token") ?? "").trim();
+  const data = await listConversations(c.env.DB, { limit, offset, token });
+  return c.json({
+    status: "success",
+    total: data.total,
+    items: data.items,
+    offset,
+    limit,
+    has_more: offset + data.items.length < data.total,
+  });
+});
+
+openAiRoutes.post("/admin/conversations/clear", async (c) => {
+  const denied = await requireLegacyAdmin(c);
+  if (denied) return denied;
+  const body = (await c.req.json().catch(() => ({}))) as {
+    conversation_id?: string;
+    token?: string;
+    expired_only?: boolean;
+  };
+  const conversationId = String(body.conversation_id ?? "").trim();
+  const token = String(body.token ?? "").trim();
+  const expiredOnly = Boolean(body.expired_only);
+
+  let deleted = 0;
+  if (conversationId) {
+    await deleteConversationById(c.env.DB, conversationId);
+    deleted = 1;
+  } else if (token) {
+    deleted = await deleteConversationsByToken(c.env.DB, token);
+  } else if (expiredOnly) {
+    deleted = await deleteExpiredConversations(c.env.DB, Date.now());
+  } else {
+    return c.json({ status: "error", detail: "missing_scope" }, 400);
+  }
+  return c.json({ status: "success", deleted });
+});
+
 openAiRoutes.get("/admin/batch/:taskId/stream", async (c) => {
   const denied = await requireLegacyAdmin(c);
   if (denied) return denied;
@@ -1461,6 +1522,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
       model?: string;
       messages?: any[];
       stream?: boolean;
+      conversation_id?: string;
     };
 
     requestedModel = String(body.model ?? "");
@@ -1487,6 +1549,43 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cf = normalizeCfCookie(settingsBundle.grok.cf_clearance ?? "");
       const cookie = cf ? `sso-rw=${jwt};sso=${jwt};${cf}` : `sso-rw=${jwt};sso=${jwt}`;
 
+      const resolvedConv = await resolveConversation({
+        env: c.env,
+        conversationIdFromReq: typeof body.conversation_id === "string" ? body.conversation_id : "",
+        messages: body.messages as any,
+      });
+      let runtimeState = resolvedConv.state;
+
+      if (
+        runtimeState &&
+        runtimeState.token &&
+        runtimeState.token !== jwt &&
+        runtimeState.shareLinkId
+      ) {
+        try {
+          const cloneResp = await cloneShareLink({
+            shareLinkId: runtimeState.shareLinkId,
+            cookie,
+            settings: settingsBundle.grok,
+          });
+          if (cloneResp.ok) {
+            const cloneData = (await cloneResp.json().catch(() => ({}))) as any;
+            const clonedConv =
+              cloneData?.conversationId ?? cloneData?.conversation_id ?? cloneData?.result?.conversationId ?? "";
+            const clonedResp =
+              cloneData?.responseId ?? cloneData?.response_id ?? cloneData?.result?.responseId ?? "";
+            runtimeState = {
+              ...runtimeState,
+              upstreamConversationId: String(clonedConv || runtimeState.upstreamConversationId || ""),
+              responseId: String(clonedResp || runtimeState.responseId || ""),
+              token: jwt,
+            };
+          }
+        } catch {
+          // ignore clone failure and fallback
+        }
+      }
+
       const { content, images } = extractContent(body.messages as any);
       const cfg = MODEL_CONFIG[requestedModel]!;
       const isVideoModel = Boolean(cfg.is_video_model);
@@ -1510,6 +1609,7 @@ openAiRoutes.post("/chat/completions", async (c) => {
           imgUris,
           ...(postId ? { postId } : {}),
           settings: settingsBundle.grok,
+          ...(runtimeState?.responseId ? { parentResponseId: runtimeState.responseId } : {}),
         });
 
         const upstream = await sendConversationRequest({
@@ -1517,6 +1617,9 @@ openAiRoutes.post("/chat/completions", async (c) => {
           cookie,
           settings: settingsBundle.grok,
           ...(referer ? { referer } : {}),
+          ...(runtimeState?.upstreamConversationId
+            ? { upstreamConversationId: runtimeState.upstreamConversationId }
+            : {}),
         });
 
         if (!upstream.ok) {
@@ -1534,7 +1637,39 @@ openAiRoutes.post("/chat/completions", async (c) => {
             settings: settingsBundle.grok,
             global: settingsBundle.global,
             origin,
-            onFinish: async ({ status, duration }) => {
+            onFinish: async ({ status, duration, responseId, upstreamConversationId, shareLinkId }) => {
+              let nextShare = shareLinkId;
+              if (!nextShare && upstreamConversationId) {
+                try {
+                  const shareResp = await createShareLink({
+                    conversationId: upstreamConversationId,
+                    cookie,
+                    settings: settingsBundle.grok,
+                  });
+                  if (shareResp.ok) {
+                    const shareData = (await shareResp.json().catch(() => ({}))) as any;
+                    nextShare = String(
+                      shareData?.shareLinkId ??
+                        shareData?.share_link_id ??
+                        shareData?.result?.shareLinkId ??
+                        "",
+                    );
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+              if (responseId) {
+                await saveConversationState({
+                  env: c.env,
+                  conversationId: resolvedConv.conversationId,
+                  upstreamConversationId,
+                  responseId,
+                  shareLinkId: nextShare,
+                  token: jwt,
+                  fullHash: resolvedConv.fullHash,
+                });
+              }
               await addRequestLog(c.env.DB, {
                 ip,
                 model: requestedModel,
@@ -1555,17 +1690,53 @@ openAiRoutes.post("/chat/completions", async (c) => {
               Connection: "keep-alive",
               "X-Accel-Buffering": "no",
               "Access-Control-Allow-Origin": "*",
+              "X-Conversation-ID": resolvedConv.conversationId,
             },
           });
         }
 
-        const json = await parseOpenAiFromGrokNdjson(upstream, {
+        const parsed = await parseOpenAiFromGrokNdjson(upstream, {
           cookie,
           settings: settingsBundle.grok,
           global: settingsBundle.global,
           origin,
           requestedModel,
         });
+
+        let shareLinkId = parsed.meta.shareLinkId;
+        if (!shareLinkId && parsed.meta.upstreamConversationId) {
+          try {
+            const shareResp = await createShareLink({
+              conversationId: parsed.meta.upstreamConversationId,
+              cookie,
+              settings: settingsBundle.grok,
+            });
+            if (shareResp.ok) {
+              const shareData = (await shareResp.json().catch(() => ({}))) as any;
+              shareLinkId = String(
+                shareData?.shareLinkId ?? shareData?.share_link_id ?? shareData?.result?.shareLinkId ?? "",
+              );
+            }
+          } catch {
+            // ignore
+          }
+        }
+        if (parsed.meta.responseId) {
+          await saveConversationState({
+            env: c.env,
+            conversationId: resolvedConv.conversationId,
+            upstreamConversationId: parsed.meta.upstreamConversationId,
+            responseId: parsed.meta.responseId,
+            shareLinkId,
+            token: jwt,
+            fullHash: resolvedConv.fullHash,
+          });
+        }
+
+        const json = {
+          ...parsed.response,
+          conversation_id: resolvedConv.conversationId,
+        };
 
         const duration = (Date.now() - start) / 1000;
         await addRequestLog(c.env.DB, {

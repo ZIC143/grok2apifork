@@ -302,6 +302,9 @@ function renderTable() {
     tdActions.className = 'text-center';
     tdActions.innerHTML = `
                 <div class="flex items-center justify-center gap-2">
+                <button onclick="openConversations('${item.token}')" class="p-1 text-gray-400 hover:text-indigo-600 rounded" title="查看会话">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                </button>
                      <button onclick="refreshStatus('${item.token}')" class="p-1 text-gray-400 hover:text-black rounded" title="刷新状态">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                      </button>
@@ -383,6 +386,13 @@ function updateSelectionState() {
   const selectedCountEl = byId('selected-count');
   if (selectedCountEl) selectedCountEl.innerText = selectedCount;
   setActionButtonsState(selectedCount);
+}
+
+function openConversations(token) {
+  const t = String(token || '').trim();
+  if (!t) return;
+  const url = `/admin/conversation?token=${encodeURIComponent(t)}&page=1&page_size=50`;
+  window.location.href = url;
 }
 
 // Actions

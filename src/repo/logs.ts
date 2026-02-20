@@ -52,3 +52,15 @@ export async function clearRequestLogs(db: Env["DB"]): Promise<void> {
   await dbRun(db, "DELETE FROM request_logs");
 }
 
+export async function deleteRequestLogsBefore(db: Env["DB"], beforeTs: number): Promise<number> {
+  const row = await dbAll<{ c: number }>(
+    db,
+    "SELECT COUNT(1) as c FROM request_logs WHERE timestamp < ?",
+    [beforeTs],
+  );
+  const count = row[0]?.c ?? 0;
+  if (count <= 0) return 0;
+  await dbRun(db, "DELETE FROM request_logs WHERE timestamp < ?", [beforeTs]);
+  return count;
+}
+

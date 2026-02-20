@@ -14,6 +14,8 @@ export interface OpenAIChatRequestBody {
 }
 
 export const CONVERSATION_API = "https://grok.com/rest/app-chat/conversations/new";
+export const SHARE_CREATE_API = "https://grok.com/rest/app-chat/conversations/{conversationId}/share";
+export const SHARE_CLONE_API = "https://grok.com/rest/app-chat/share-links/{shareLinkId}/clone";
 
 export function extractContent(messages: OpenAIChatMessage[]): { content: string; images: string[] } {
   const formatted: string[] = [];
@@ -53,8 +55,9 @@ export function buildConversationPayload(args: {
   imgUris: string[];
   postId?: string;
   settings: GrokSettings;
+  parentResponseId?: string;
 }): { payload: Record<string, unknown>; referer?: string; isVideoModel: boolean } {
-  const { requestModel, content, imgIds, imgUris, postId, settings } = args;
+  const { requestModel, content, imgIds, imgUris, postId, settings, parentResponseId } = args;
   const cfg = getModelInfo(requestModel);
   const { grokModel, mode, isVideoModel } = toGrokModel(requestModel);
 
@@ -70,6 +73,7 @@ export function buildConversationPayload(args: {
         message: `${ref}  ${content} --mode=custom`,
         fileAttachments: imgIds,
         toolOverrides: { videoGen: true },
+        ...(parentResponseId ? { parentResponseId } : {}),
       },
     };
   }
@@ -100,6 +104,7 @@ export function buildConversationPayload(args: {
       forceSideBySide: false,
       modelMode: mode,
       isAsyncChat: false,
+      ...(parentResponseId ? { parentResponseId } : {}),
     },
   };
 }
@@ -109,12 +114,45 @@ export async function sendConversationRequest(args: {
   cookie: string;
   settings: GrokSettings;
   referer?: string;
+  upstreamConversationId?: string;
 }): Promise<Response> {
-  const { payload, cookie, settings, referer } = args;
-  const headers = getDynamicHeaders(settings, "/rest/app-chat/conversations/new");
+  const { payload, cookie, settings, referer, upstreamConversationId } = args;
+  const path = upstreamConversationId
+    ? `/rest/app-chat/conversations/${upstreamConversationId}/responses`
+    : "/rest/app-chat/conversations/new";
+  const headers = getDynamicHeaders(settings, path);
   headers.Cookie = cookie;
   if (referer) headers.Referer = referer;
   const body = JSON.stringify(payload);
+  const apiUrl = upstreamConversationId
+    ? `https://grok.com${path}`
+    : CONVERSATION_API;
 
-  return fetch(CONVERSATION_API, { method: "POST", headers, body });
+  return fetch(apiUrl, { method: "POST", headers, body });
+}
+
+export async function createShareLink(args: {
+  conversationId: string;
+  cookie: string;
+  settings: GrokSettings;
+}): Promise<Response> {
+  const { conversationId, cookie, settings } = args;
+  const path = `/rest/app-chat/conversations/${conversationId}/share`;
+  const headers = getDynamicHeaders(settings, path);
+  headers.Cookie = cookie;
+  const apiUrl = SHARE_CREATE_API.replace("{conversationId}", encodeURIComponent(conversationId));
+  return fetch(apiUrl, { method: "POST", headers, body: "{}" });
+}
+
+export async function cloneShareLink(args: {
+  shareLinkId: string;
+  cookie: string;
+  settings: GrokSettings;
+}): Promise<Response> {
+  const { shareLinkId, cookie, settings } = args;
+  const path = `/rest/app-chat/share-links/${shareLinkId}/clone`;
+  const headers = getDynamicHeaders(settings, path);
+  headers.Cookie = cookie;
+  const apiUrl = SHARE_CLONE_API.replace("{shareLinkId}", encodeURIComponent(shareLinkId));
+  return fetch(apiUrl, { method: "POST", headers, body: "{}" });
 }

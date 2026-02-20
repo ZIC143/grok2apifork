@@ -34,6 +34,12 @@ import {
   listOldestRows,
   type CacheType,
 } from "../repo/cache";
+import {
+  deleteConversationById,
+  deleteConversationsByToken,
+  deleteExpiredConversations,
+  listConversations,
+} from "../repo/conversations";
 
 function jsonError(message: string, code: string): Record<string, unknown> {
   return { error: message, code };
@@ -547,6 +553,63 @@ adminRoutes.post("/api/cache/clear/videos", requireAdminAuth, async (c) => {
     return c.json({ success: true, message: `视频缓存清理完成，已删除 ${deleted} 个文件`, data: { deleted_count: deleted, type: "videos" } });
   } catch (e) {
     return c.json(jsonError(`清理失败: ${e instanceof Error ? e.message : String(e)}`, "VIDEO_CACHE_CLEAR_ERROR"), 500);
+  }
+});
+
+// === Conversations ===
+adminRoutes.get("/api/conversations", requireAdminAuth, async (c) => {
+  try {
+    const limit = Math.max(1, Math.min(2000, Number(c.req.query("limit") ?? 100)));
+    const offset = Math.max(0, Number(c.req.query("offset") ?? 0));
+    const token = String(c.req.query("token") ?? "").trim();
+    const data = await listConversations(c.env.DB, { limit, offset, token });
+    return c.json({
+      success: true,
+      data: {
+        total: data.total,
+        items: data.items,
+        offset,
+        limit,
+        has_more: offset + data.items.length < data.total,
+      },
+    });
+  } catch (e) {
+    return c.json(
+      jsonError(`获取失败: ${e instanceof Error ? e.message : String(e)}`, "CONVERSATIONS_LIST_ERROR"),
+      500,
+    );
+  }
+});
+
+adminRoutes.post("/api/conversations/clear", requireAdminAuth, async (c) => {
+  try {
+    const body = (await c.req.json().catch(() => ({}))) as {
+      conversation_id?: string;
+      token?: string;
+      expired_only?: boolean;
+    };
+    const conversationId = String(body.conversation_id ?? "").trim();
+    const token = String(body.token ?? "").trim();
+    const expiredOnly = Boolean(body.expired_only);
+
+    let deleted = 0;
+    if (conversationId) {
+      await deleteConversationById(c.env.DB, conversationId);
+      deleted = 1;
+    } else if (token) {
+      deleted = await deleteConversationsByToken(c.env.DB, token);
+    } else if (expiredOnly) {
+      deleted = await deleteExpiredConversations(c.env.DB, Date.now());
+    } else {
+      return c.json({ success: false, message: "请指定 conversation_id、token 或 expired_only" }, 400);
+    }
+
+    return c.json({ success: true, data: { deleted } });
+  } catch (e) {
+    return c.json(
+      jsonError(`清理失败: ${e instanceof Error ? e.message : String(e)}`, "CONVERSATIONS_CLEAR_ERROR"),
+      500,
+    );
   }
 });
 

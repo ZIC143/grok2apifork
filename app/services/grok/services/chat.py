@@ -20,10 +20,12 @@ from app.core.exceptions import (
     StreamIdleTimeoutError,
 )
 from app.services.grok.services.model import ModelService
+from app.services.grok.services.conversation import get_conversation_store
 from app.services.grok.utils.upload import UploadService
 from app.services.grok.utils import process as proc_base
 from app.services.grok.utils.retry import pick_token, rate_limited
 from app.services.reverse.app_chat import AppChatReverse
+from app.services.reverse.share_link import ShareLinkReverse
 from app.services.reverse.utils.session import ResettableSession
 from app.services.grok.utils.stream import wrap_stream_with_usage
 from app.services.token import get_token_manager, EffortType
@@ -97,6 +99,24 @@ def _get_chat_semaphore() -> asyncio.Semaphore:
         _CHAT_SEM_VALUE = value
         _CHAT_SEMAPHORE = asyncio.Semaphore(value)
     return _CHAT_SEMAPHORE
+
+
+def _extract_first_str(payload: Any, keys: List[str]) -> str:
+    if isinstance(payload, dict):
+        for k in keys:
+            v = payload.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        for v in payload.values():
+            found = _extract_first_str(v, keys)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for item in payload:
+            found = _extract_first_str(item, keys)
+            if found:
+                return found
+    return ""
 
 
 class MessageExtractor:
@@ -178,6 +198,7 @@ class GrokChatService:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        conversation_state: Dict[str, Any] | None = None,
     ):
         """发送聊天请求"""
         if stream is None:
@@ -202,6 +223,12 @@ class GrokChatService:
                         file_attachments=file_attachments,
                         tool_overrides=tool_overrides,
                         model_config_override=model_config_override,
+                        conversation_id=(conversation_state or {}).get(
+                            "upstream_conversation_id"
+                        ),
+                        parent_response_id=(conversation_state or {}).get(
+                            "response_id"
+                        ),
                     )
                     logger.info(f"Chat connected: model={model}, stream={stream}")
                     async for line in stream_response:
@@ -224,6 +251,7 @@ class GrokChatService:
         reasoning_effort: str | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        conversation_state: Dict[str, Any] | None = None,
     ):
         """OpenAI 兼容接口"""
         model_info = ModelService.get(model)
@@ -276,6 +304,7 @@ class GrokChatService:
             stream,
             file_attachments=all_attachments,
             model_config_override=model_config_override,
+            conversation_state=conversation_state,
         )
 
         return response, stream, model
@@ -292,6 +321,7 @@ class ChatService:
         reasoning_effort: str | None = None,
         temperature: float = 0.8,
         top_p: float = 0.95,
+        conversation_id: str | None = None,
     ):
         """Chat Completions 入口"""
         # 获取 token
@@ -304,6 +334,11 @@ class ChatService:
         else:
             show_think = reasoning_effort != "none"
         is_stream = stream if stream is not None else get_config("app.stream")
+        conversation_store = await get_conversation_store()
+        client_conversation_id, state = await conversation_store.resolve(
+            conversation_id, messages
+        )
+        preferred_token = (state or {}).get("token")
 
         # 跨 Token 重试循环
         tried_tokens = set()
@@ -312,7 +347,7 @@ class ChatService:
 
         for attempt in range(max_token_retries):
             # 选择 token
-            token = await pick_token(token_mgr, model, tried_tokens)
+            token = await pick_token(token_mgr, model, tried_tokens, preferred_token)
             if not token:
                 if last_error:
                     raise last_error
@@ -324,6 +359,35 @@ class ChatService:
                 )
 
             tried_tokens.add(token)
+            preferred_token = None
+
+            req_state = dict(state or {})
+            if (
+                state
+                and state.get("token")
+                and state.get("token") != token
+                and state.get("share_link_id")
+            ):
+                try:
+                    async with ResettableSession() as session:
+                        cloned = await ShareLinkReverse.clone(
+                            session, token, state.get("share_link_id")
+                        )
+                    cloned_conv_id = _extract_first_str(
+                        cloned, ["conversationId", "conversation_id"]
+                    )
+                    cloned_resp_id = _extract_first_str(
+                        cloned, ["responseId", "response_id"]
+                    )
+                    if cloned_conv_id:
+                        req_state["upstream_conversation_id"] = cloned_conv_id
+                    if cloned_resp_id:
+                        req_state["response_id"] = cloned_resp_id
+                    req_state["token"] = token
+                except Exception as e:
+                    logger.warning(
+                        f"Cross-account clone failed, fallback to original state: {e}"
+                    )
 
             try:
                 # 请求 Grok
@@ -336,19 +400,67 @@ class ChatService:
                     reasoning_effort=reasoning_effort,
                     temperature=temperature,
                     top_p=top_p,
+                    conversation_state=req_state,
                 )
 
                 # 处理响应
                 if is_stream:
                     logger.debug(f"Processing stream response: model={model}")
                     processor = StreamProcessor(model_name, token, show_think)
-                    return wrap_stream_with_usage(
+                    wrapped = wrap_stream_with_usage(
                         processor.process(response), token_mgr, token, model
                     )
 
+                    async def with_conversation_state():
+                        try:
+                            async for chunk in wrapped:
+                                yield chunk
+                        finally:
+                            try:
+                                if processor.response_id:
+                                    share_link_id = processor.share_link_id
+                                    if (
+                                        not share_link_id
+                                        and processor.conversation_id
+                                    ):
+                                        try:
+                                            async with ResettableSession() as session:
+                                                shared = await ShareLinkReverse.create(
+                                                    session,
+                                                    token,
+                                                    processor.conversation_id,
+                                                )
+                                            share_link_id = _extract_first_str(
+                                                shared,
+                                                [
+                                                    "shareLinkId",
+                                                    "share_link_id",
+                                                    "shareId",
+                                                ],
+                                            )
+                                        except Exception as e:
+                                            logger.debug(
+                                                f"Share link create failed(stream): {e}"
+                                            )
+                                    await conversation_store.upsert(
+                                        client_conversation_id=client_conversation_id,
+                                        token=token,
+                                        messages=messages,
+                                        upstream_conversation_id=processor.conversation_id,
+                                        response_id=processor.response_id,
+                                        share_link_id=share_link_id,
+                                    )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to persist stream conversation state: {e}"
+                                )
+
+                    return with_conversation_state(), client_conversation_id
+
                 # 非流式
                 logger.debug(f"Processing non-stream response: model={model}")
-                result = await CollectProcessor(model_name, token).process(response)
+                collect_processor = CollectProcessor(model_name, token)
+                result = await collect_processor.process(response)
                 try:
                     model_info = ModelService.get(model)
                     effort = (
@@ -360,7 +472,37 @@ class ChatService:
                     logger.info(f"Chat completed: model={model}, effort={effort.value}")
                 except Exception as e:
                     logger.warning(f"Failed to record usage: {e}")
-                return result
+                try:
+                    if collect_processor.response_id:
+                        share_link_id = collect_processor.share_link_id
+                        if (
+                            not share_link_id
+                            and collect_processor.conversation_id
+                        ):
+                            try:
+                                async with ResettableSession() as session:
+                                    shared = await ShareLinkReverse.create(
+                                        session,
+                                        token,
+                                        collect_processor.conversation_id,
+                                    )
+                                share_link_id = _extract_first_str(
+                                    shared,
+                                    ["shareLinkId", "share_link_id", "shareId"],
+                                )
+                            except Exception as e:
+                                logger.debug(f"Share link create failed: {e}")
+                        await conversation_store.upsert(
+                            client_conversation_id=client_conversation_id,
+                            token=token,
+                            messages=messages,
+                            upstream_conversation_id=collect_processor.conversation_id,
+                            response_id=collect_processor.response_id,
+                            share_link_id=share_link_id,
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to persist conversation state: {e}")
+                return result, client_conversation_id
 
             except UpstreamException as e:
                 last_error = e
@@ -394,6 +536,8 @@ class StreamProcessor(proc_base.BaseProcessor):
     def __init__(self, model: str, token: str = "", show_think: bool = None):
         super().__init__(model, token)
         self.response_id: str = None
+        self.conversation_id: str = ""
+        self.share_link_id: str = ""
         self.fingerprint: str = ""
         self.rollout_id: str = ""
         self.think_opened: bool = False
@@ -533,6 +677,10 @@ class StreamProcessor(proc_base.BaseProcessor):
                     self.fingerprint = llm.get("modelHash", "")
                 if rid := resp.get("responseId"):
                     self.response_id = rid
+                if cid := resp.get("conversationId"):
+                    self.conversation_id = str(cid)
+                if sid := resp.get("shareLinkId"):
+                    self.share_link_id = str(sid)
                 if rid := resp.get("rolloutId"):
                     self.rollout_id = str(rid)
 
@@ -557,6 +705,12 @@ class StreamProcessor(proc_base.BaseProcessor):
                     continue
 
                 if mr := resp.get("modelResponse"):
+                    if cid := mr.get("conversationId"):
+                        self.conversation_id = str(cid)
+                    if sid := mr.get("shareLinkId"):
+                        self.share_link_id = str(sid)
+                    if rid := mr.get("responseId"):
+                        self.response_id = rid
                     for url in proc_base._collect_images(mr):
                         parts = url.split("/")
                         img_id = parts[-2] if len(parts) >= 2 else "image"
@@ -657,6 +811,9 @@ class CollectProcessor(proc_base.BaseProcessor):
     def __init__(self, model: str, token: str = ""):
         super().__init__(model, token)
         self.filter_tags = get_config("app.filter_tags")
+        self.response_id: str = ""
+        self.conversation_id: str = ""
+        self.share_link_id: str = ""
 
     def _filter_content(self, content: str) -> str:
         """Filter special tags in content."""
@@ -711,12 +868,21 @@ class CollectProcessor(proc_base.BaseProcessor):
                     continue
 
                 resp = data.get("result", {}).get("response", {})
+                if cid := resp.get("conversationId"):
+                    self.conversation_id = str(cid)
+                if sid := resp.get("shareLinkId"):
+                    self.share_link_id = str(sid)
 
                 if (llm := resp.get("llmInfo")) and not fingerprint:
                     fingerprint = llm.get("modelHash", "")
 
                 if mr := resp.get("modelResponse"):
                     response_id = mr.get("responseId", "")
+                    self.response_id = response_id
+                    if cid := mr.get("conversationId"):
+                        self.conversation_id = str(cid)
+                    if sid := mr.get("shareLinkId"):
+                        self.share_link_id = str(sid)
                     content = mr.get("message", "")
 
                     card_map: dict[str, tuple[str, str]] = {}

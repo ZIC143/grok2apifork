@@ -27,6 +27,7 @@ class AppChatReverse:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        parent_response_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build chat payload for Grok app-chat API."""
 
@@ -70,6 +71,8 @@ class AppChatReverse:
 
         if model_config_override:
             payload["responseMetadata"]["modelConfigOverride"] = model_config_override
+        if parent_response_id:
+            payload["parentResponseId"] = parent_response_id
 
         return payload
 
@@ -83,6 +86,8 @@ class AppChatReverse:
         file_attachments: List[str] = None,
         tool_overrides: Dict[str, Any] = None,
         model_config_override: Dict[str, Any] = None,
+        conversation_id: Optional[str] = None,
+        parent_response_id: Optional[str] = None,
     ) -> Any:
         """Send app chat request to Grok.
         
@@ -120,7 +125,14 @@ class AppChatReverse:
                 file_attachments=file_attachments,
                 tool_overrides=tool_overrides,
                 model_config_override=model_config_override,
+                parent_response_id=parent_response_id,
             )
+
+            api_url = CHAT_API
+            if conversation_id:
+                api_url = (
+                    f"https://grok.com/rest/app-chat/conversations/{conversation_id}/responses"
+                )
 
             # Curl Config
             timeout = max(
@@ -132,7 +144,7 @@ class AppChatReverse:
 
             async def _do_request():
                 response = await session.post(
-                    CHAT_API,
+                    api_url,
                     headers=headers,
                     data=orjson.dumps(payload),
                     timeout=timeout,

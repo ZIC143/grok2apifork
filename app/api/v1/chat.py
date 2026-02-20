@@ -57,6 +57,7 @@ class ChatCompletionRequest(BaseModel):
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
     # 图片生成配置
     image_config: Optional[ImageConfig] = Field(None, description="图片生成参数")
+    conversation_id: Optional[str] = Field(None, description="会话ID，用于续接上下文")
 
 
 VALID_ROLES = {"developer", "system", "user", "assistant"}
@@ -667,22 +668,29 @@ async def chat_completions(request: ChatCompletionRequest):
             preset=v_conf.preset,
         )
     else:
-        result = await ChatService.completions(
+        result, conversation_id = await ChatService.completions(
             model=request.model,
             messages=[msg.model_dump() for msg in request.messages],
             stream=request.stream,
             reasoning_effort=request.reasoning_effort,
             temperature=request.temperature,
             top_p=request.top_p,
+            conversation_id=request.conversation_id,
         )
 
     if isinstance(result, dict):
+        if conversation_id:
+            result["conversation_id"] = conversation_id
         return JSONResponse(content=result)
     else:
         return StreamingResponse(
             result,
             media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Conversation-ID": conversation_id or "",
+            },
         )
 
 

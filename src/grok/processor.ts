@@ -120,7 +120,13 @@ export function createOpenAiStreamFromGrokNdjson(
     settings: GrokSettings;
     global: GlobalSettings;
     origin: string;
-    onFinish?: (result: { status: number; duration: number }) => Promise<void> | void;
+    onFinish?: (result: {
+      status: number;
+      duration: number;
+      responseId: string;
+      upstreamConversationId: string;
+      shareLinkId: string;
+    }) => Promise<void> | void;
   },
 ): ReadableStream<Uint8Array> {
   const { settings, global, origin } = opts;
@@ -157,6 +163,9 @@ export function createOpenAiStreamFromGrokNdjson(
       let firstReceived = false;
 
       let currentModel = "grok-4-mini-thinking-tahoe";
+      let responseId = "";
+      let upstreamConversationId = "";
+      let shareLinkId = "";
       let isImage = false;
       let isThinking = false;
       let thinkingFinished = false;
@@ -177,20 +186,41 @@ export function createOpenAiStreamFromGrokNdjson(
           const elapsed = now - startTime;
           if (!firstReceived && elapsed > firstTimeoutMs) {
             flushStop();
-            if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+            if (opts.onFinish)
+              await opts.onFinish({
+                status: finalStatus,
+                duration: (Date.now() - startTime) / 1000,
+                responseId,
+                upstreamConversationId,
+                shareLinkId,
+              });
             controller.close();
             return;
           }
           if (totalTimeoutMs > 0 && elapsed > totalTimeoutMs) {
             flushStop();
-            if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+            if (opts.onFinish)
+              await opts.onFinish({
+                status: finalStatus,
+                duration: (Date.now() - startTime) / 1000,
+                responseId,
+                upstreamConversationId,
+                shareLinkId,
+              });
             controller.close();
             return;
           }
           const idle = now - lastChunkTime;
           if (firstReceived && idle > chunkTimeoutMs) {
             flushStop();
-            if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+            if (opts.onFinish)
+              await opts.onFinish({
+                status: finalStatus,
+                duration: (Date.now() - startTime) / 1000,
+                responseId,
+                upstreamConversationId,
+                shareLinkId,
+              });
             controller.close();
             return;
           }
@@ -203,7 +233,14 @@ export function createOpenAiStreamFromGrokNdjson(
           const res = await readWithTimeout(reader, perReadTimeout);
           if ("timeout" in res) {
             flushStop();
-            if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+            if (opts.onFinish)
+              await opts.onFinish({
+                status: finalStatus,
+                duration: (Date.now() - startTime) / 1000,
+                responseId,
+                upstreamConversationId,
+                shareLinkId,
+              });
             controller.close();
             return;
           }
@@ -236,13 +273,24 @@ export function createOpenAiStreamFromGrokNdjson(
                 encoder.encode(makeChunk(id, created, currentModel, `Error: ${String(err.message)}`, "stop")),
               );
               controller.enqueue(encoder.encode(makeDone()));
-              if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+              if (opts.onFinish)
+                await opts.onFinish({
+                  status: finalStatus,
+                  duration: (Date.now() - startTime) / 1000,
+                  responseId,
+                  upstreamConversationId,
+                  shareLinkId,
+                });
               controller.close();
               return;
             }
 
             const grok = (data as any).result?.response;
             if (!grok) continue;
+            if (typeof grok.responseId === "string" && grok.responseId) responseId = grok.responseId;
+            if (typeof grok.conversationId === "string" && grok.conversationId)
+              upstreamConversationId = grok.conversationId;
+            if (typeof grok.shareLinkId === "string" && grok.shareLinkId) shareLinkId = grok.shareLinkId;
 
             const userRespModel = grok.userResponse?.model;
             if (typeof userRespModel === "string" && userRespModel.trim()) currentModel = userRespModel.trim();
@@ -295,7 +343,14 @@ export function createOpenAiStreamFromGrokNdjson(
                     encoder.encode(makeChunk(id, created, currentModel, linesOut.join("\n"), "stop")),
                   );
                   controller.enqueue(encoder.encode(makeDone()));
-                  if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+                  if (opts.onFinish)
+                    await opts.onFinish({
+                      status: finalStatus,
+                      duration: (Date.now() - startTime) / 1000,
+                      responseId,
+                      upstreamConversationId,
+                      shareLinkId,
+                    });
                   controller.close();
                   return;
                 }
@@ -357,7 +412,14 @@ export function createOpenAiStreamFromGrokNdjson(
 
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
-        if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+        if (opts.onFinish)
+          await opts.onFinish({
+            status: finalStatus,
+            duration: (Date.now() - startTime) / 1000,
+            responseId,
+            upstreamConversationId,
+            shareLinkId,
+          });
         controller.close();
       } catch (e) {
         finalStatus = 500;
@@ -367,7 +429,14 @@ export function createOpenAiStreamFromGrokNdjson(
           ),
         );
         controller.enqueue(encoder.encode(makeDone()));
-        if (opts.onFinish) await opts.onFinish({ status: finalStatus, duration: (Date.now() - startTime) / 1000 });
+        if (opts.onFinish)
+          await opts.onFinish({
+            status: finalStatus,
+            duration: (Date.now() - startTime) / 1000,
+            responseId,
+            upstreamConversationId,
+            shareLinkId,
+          });
         controller.close();
       } finally {
         try {
@@ -383,13 +452,16 @@ export function createOpenAiStreamFromGrokNdjson(
 export async function parseOpenAiFromGrokNdjson(
   grokResp: Response,
   opts: { cookie: string; settings: GrokSettings; global: GlobalSettings; origin: string; requestedModel: string },
-): Promise<Record<string, unknown>> {
+): Promise<{ response: Record<string, unknown>; meta: { responseId: string; upstreamConversationId: string; shareLinkId: string } }> {
   const { global, origin, requestedModel } = opts;
   const text = await grokResp.text();
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
 
   let content = "";
   let model = requestedModel;
+  let responseId = "";
+  let upstreamConversationId = "";
+  let shareLinkId = "";
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -403,6 +475,9 @@ export async function parseOpenAiFromGrokNdjson(
 
     const grok = (data as any).result?.response;
     if (!grok) continue;
+    if (typeof grok.responseId === "string" && grok.responseId) responseId = grok.responseId;
+    if (typeof grok.conversationId === "string" && grok.conversationId) upstreamConversationId = grok.conversationId;
+    if (typeof grok.shareLinkId === "string" && grok.shareLinkId) shareLinkId = grok.shareLinkId;
 
     const videoResp = grok.streamingVideoGenerationResponse;
     if (videoResp?.videoUrl && typeof videoResp.videoUrl === "string") {
@@ -416,6 +491,10 @@ export async function parseOpenAiFromGrokNdjson(
     const modelResp = grok.modelResponse;
     if (!modelResp) continue;
     if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
+    if (typeof modelResp.responseId === "string" && modelResp.responseId) responseId = modelResp.responseId;
+    if (typeof modelResp.conversationId === "string" && modelResp.conversationId)
+      upstreamConversationId = modelResp.conversationId;
+    if (typeof modelResp.shareLinkId === "string" && modelResp.shareLinkId) shareLinkId = modelResp.shareLinkId;
 
     if (typeof modelResp.model === "string" && modelResp.model) model = modelResp.model;
     if (typeof modelResp.message === "string") content = modelResp.message;
@@ -439,17 +518,20 @@ export async function parseOpenAiFromGrokNdjson(
   }
 
   return {
-    id: `chatcmpl-${crypto.randomUUID()}`,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [
-      {
-        index: 0,
-        message: { role: "assistant", content },
-        finish_reason: "stop",
-      },
-    ],
-    usage: null,
+    response: {
+      id: `chatcmpl-${crypto.randomUUID()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content },
+          finish_reason: "stop",
+        },
+      ],
+      usage: null,
+    },
+    meta: { responseId, upstreamConversationId, shareLinkId },
   };
 }

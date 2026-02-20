@@ -82,6 +82,31 @@ docker compose up -d
 - **NSFW 开启**：一键为 Token 开启 Unhinged 模式（需代理或 `cf_clearance`）
 - **配置管理**：在线修改系统配置
 - **缓存管理**：查看和清理媒体缓存
+- **会话管理**：查看会话续接状态并支持后台清理
+
+> 新增：支持真实会话续接（`conversation_id`）、跨账号 `share/clone` 续接。
+
+### 会话续接与跨账号续接
+
+- 请求可选参数：`conversation_id`
+- 响应会返回：`conversation_id`（非流式在 JSON 字段中，流式在响应头 `X-Conversation-ID`）
+- 当轮询切换到其他 token 时，系统会优先尝试 `share/clone` 以保持上下文连续
+
+### 管理接口（会话）
+
+- Python 管理接口：
+  - `GET /v1/admin/conversations`
+  - `POST /v1/admin/conversations/clear`
+- Worker 管理接口：
+  - `GET /api/conversations`
+  - `POST /api/conversations/clear`
+  - Legacy: `GET /v1/admin/conversations` / `POST /v1/admin/conversations/clear`
+
+### Worker 迁移
+
+本次新增会话表，部署 Worker 前请执行 D1 migration：
+
+- `migrations/0004_conversations.sql`
 
 <br>
 

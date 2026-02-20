@@ -90,6 +90,16 @@ concurrent = 50
 timeout = 60
 # 流式空闲超时时间（秒）
 stream_timeout = 60
+# 会话状态存活时间（秒）
+conversation_ttl = 72000
+
+[maintenance]
+# 后台清理执行间隔（秒）
+cleanup_interval_sec = 1800
+# 日志保留天数
+log_retention_days = 7
+# 日志目录（可选覆盖）
+log_dir = ""
 
 # ==================== 图像配置 ====================
 [image]

@@ -29,7 +29,11 @@ const NUMERIC_FIELDS = new Set([
   'final_min_bytes',
   'medium_min_bytes',
   'concurrent',
-  'batch_size'
+  'batch_size',
+  'conversation_ttl',
+  'cleanup_interval_sec',
+  'log_retention_days',
+  'conversation_ttl_seconds'
 ]);
 
 const LOCALE_MAP = {
@@ -42,6 +46,8 @@ const LOCALE_MAP = {
     "app_url": { title: "应用地址", desc: "当前 Grok2API 服务的外部访问 URL，用于文件链接访问。" },
     "image_format": { title: "图片格式", desc: "默认生成的图片格式（url 或 base64）。" },
     "video_format": { title: "视频格式", desc: "默认生成的视频格式（html 或 url，url 为处理后的链接）。" },
+    "log_retention_days": { title: "日志保留天数", desc: "请求日志文件自动清理保留天数。" },
+    "conversation_ttl_seconds": { title: "会话TTL(秒)", desc: "会话上下文状态过期时间（秒）。" },
     "temporary": { title: "临时对话", desc: "是否默认启用临时对话模式。" },
     "disable_memory": { title: "禁用记忆", desc: "是否默认禁用 Grok 记忆功能。" },
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },
@@ -76,7 +82,8 @@ const LOCALE_MAP = {
     "label": "对话配置",
     "concurrent": { title: "并发上限", desc: "Reverse 接口并发上限。" },
     "timeout": { title: "请求超时", desc: "Reverse 接口超时时间（秒）。" },
-    "stream_timeout": { title: "流空闲超时", desc: "流式空闲超时时间（秒）。" }
+    "stream_timeout": { title: "流空闲超时", desc: "流式空闲超时时间（秒）。" },
+    "conversation_ttl": { title: "会话TTL(秒)", desc: "会话上下文状态过期时间（秒）。" }
   },
 
 
@@ -151,6 +158,14 @@ const LOCALE_MAP = {
     "concurrent": { title: "并发上限", desc: "批量刷新用量时的并发请求上限。推荐 10。" },
     "batch_size": { title: "批次大小", desc: "批量刷新用量的单批处理数量。推荐 50。" },
     "timeout": { title: "请求超时", desc: "用量查询接口的超时时间（秒）。推荐 60。" }
+  },
+
+
+  "maintenance": {
+    "label": "维护清理",
+    "cleanup_interval_sec": { title: "清理间隔", desc: "后台自动清理执行间隔（秒）。" },
+    "log_retention_days": { title: "日志保留天数", desc: "日志文件自动清理保留天数。" },
+    "log_dir": { title: "日志目录", desc: "日志目录路径，留空使用默认 logs/。" }
   }
 };
 

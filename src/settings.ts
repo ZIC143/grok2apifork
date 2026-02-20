@@ -12,6 +12,8 @@ export interface GlobalSettings {
   public_key?: string;
   image_cache_max_size_mb?: number;
   video_cache_max_size_mb?: number;
+  log_retention_days?: number;
+  conversation_ttl_seconds?: number;
 }
 
 export interface GrokSettings {
@@ -48,6 +50,8 @@ const DEFAULTS: SettingsBundle = {
     public_key: "",
     image_cache_max_size_mb: 512,
     video_cache_max_size_mb: 1024,
+    log_retention_days: 7,
+    conversation_ttl_seconds: 72000,
   },
   grok: {
     api_key: "",

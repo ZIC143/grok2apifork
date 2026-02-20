@@ -1,6 +1,9 @@
 import type { Env } from "../env";
 import { nowMs } from "../utils/time";
 import { deleteCacheRows, listOldestRows } from "../repo/cache";
+import { getSettings } from "../settings";
+import { deleteExpiredConversations } from "../repo/conversations";
+import { deleteRequestLogsBefore } from "../repo/logs";
 
 function parseIntSafe(v: string | undefined, fallback: number): number {
   const n = Number(v);
@@ -28,7 +31,13 @@ export async function runKvDailyClear(env: Env): Promise<{ deleted: number }> {
     if (keys.length < batch) break;
   }
 
-  return { deleted };
+  const settings = await getSettings(env);
+  const now = nowMs();
+  const conversationDeleted = await deleteExpiredConversations(env.DB, now);
+  const retentionDays = Math.max(1, Number(settings.global.log_retention_days ?? 7));
+  const logsDeleted = await deleteRequestLogsBefore(env.DB, now - retentionDays * 24 * 3600 * 1000);
+
+  return { deleted: deleted + conversationDeleted + logsDeleted };
 }
 
 export function nextLocalMidnightExpirationSeconds(now = nowMs(), tzOffsetMinutes: number): number {
