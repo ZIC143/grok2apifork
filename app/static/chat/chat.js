@@ -105,7 +105,11 @@ function showUserMsg(role, content) {
     <div class="msg-bubble"></div>
   `;
   const bubble = wrap.querySelector('.msg-bubble');
-  renderContent(bubble, content, role !== 'assistant');
+  if (role === 'assistant') {
+    renderAssistantBubble(bubble, content);
+  } else {
+    renderContent(bubble, content, true);
+  }
   q('chat-messages').appendChild(wrap);
   q('chat-messages').scrollTop = q('chat-messages').scrollHeight;
   return bubble;
@@ -296,6 +300,106 @@ function renderContent(container, content, forceText) {
   }
   container.innerHTML = html;
   bindRetryableImages(container);
+}
+
+function extractThinkSegments(raw) {
+  const text = String(raw || '');
+  if (!text) return { think: '', output: '', open: false };
+  let think = '';
+  let output = '';
+  let cursor = 0;
+  let open = false;
+  while (cursor < text.length) {
+    const openIdx = text.indexOf('<think>', cursor);
+    if (openIdx < 0) {
+      const tail = text.slice(cursor);
+      if (open) think += tail; else output += tail;
+      break;
+    }
+    if (openIdx > cursor) {
+      const chunk = text.slice(cursor, openIdx);
+      if (open) think += chunk; else output += chunk;
+    }
+    const closeIdx = text.indexOf('</think>', openIdx + 7);
+    if (closeIdx < 0) {
+      open = true;
+      cursor = openIdx + 7;
+      continue;
+    }
+    const inner = text.slice(openIdx + 7, closeIdx);
+    think += inner;
+    open = false;
+    cursor = closeIdx + 8;
+  }
+  return { think: think.trim(), output: output.trim(), open };
+}
+
+function stripThinkSegments(raw) {
+  return String(raw || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+function convertMarkdownLinks(text) {
+  return String(text || '').replace(/- \[([^\]]+)]\(([^\s)]+)(?:\s+"([^"]*)")?\)/g, (m, title, url, preview) => {
+    const safeTitle = escapeHtml(String(title || '').trim());
+    const safeUrl = escapeHtml(String(url || '').trim());
+    const safePreview = escapeHtml(String(preview || '').trim());
+    if (!safeUrl) return m;
+    const tip = safePreview ? ` title="${safePreview}"` : '';
+    return `- <a href="${safeUrl}" target="_blank" rel="noopener noreferrer"${tip}>${safeTitle || safeUrl}</a>`;
+  });
+}
+
+function renderThinkPanel(panelEl, text) {
+  const html = sanitizeHtml(mdImagesToHtml(convertMarkdownLinks(text)).replace(/\n/g, '<br/>'));
+  panelEl.innerHTML = html;
+  bindRetryableImages(panelEl);
+}
+
+function ensureAssistantBubble(bubbleEl) {
+  if (!bubbleEl) return null;
+  if (bubbleEl.dataset.thinkReady === '1') return bubbleEl;
+  bubbleEl.dataset.thinkReady = '1';
+  bubbleEl.innerHTML = `
+    <div class="think-panel collapsed">
+      <button type="button" class="think-toggle">显示思考过程</button>
+      <div class="think-content"></div>
+    </div>
+    <div class="assistant-content"></div>
+  `;
+  const toggle = bubbleEl.querySelector('.think-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      bubbleEl.classList.toggle('think-open');
+      const panel = bubbleEl.querySelector('.think-panel');
+      if (panel) panel.classList.toggle('collapsed');
+      toggle.textContent = bubbleEl.classList.contains('think-open') ? '隐藏思考过程' : '显示思考过程';
+    });
+  }
+  return bubbleEl;
+}
+
+function renderAssistantBubble(bubbleEl, fullText) {
+  const bubble = ensureAssistantBubble(bubbleEl);
+  if (!bubble) return;
+  const segments = extractThinkSegments(fullText);
+  const thinkPanel = bubble.querySelector('.think-panel');
+  const thinkContent = bubble.querySelector('.think-content');
+  const answerContent = bubble.querySelector('.assistant-content');
+  const hasThink = Boolean(segments.think);
+
+  if (thinkPanel && thinkContent) {
+    if (hasThink) {
+      thinkPanel.classList.remove('hidden');
+      renderThinkPanel(thinkContent, segments.think);
+    } else {
+      thinkPanel.classList.add('hidden');
+      thinkContent.innerHTML = '';
+    }
+  }
+
+  if (answerContent) {
+    renderContent(answerContent, segments.output || '', false);
+  }
 }
 
 async function init() {
@@ -934,15 +1038,15 @@ async function retryLastAssistantAnswer() {
     const body = { model, messages: retryMessages, stream };
     if (stream) {
       const content = await streamChat(body, assistantBubble, false);
-      chatMessages = [...retryMessages, { role: 'assistant', content }];
+      chatMessages = [...retryMessages, { role: 'assistant', content: stripThinkSegments(content) }];
     } else {
       const res = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify(body) });
       const data = await res.json().catch(() => ({}));
       if (res.status === 401) throw new Error('API Key 无效或未授权');
       if (!res.ok) throw new Error(data?.error?.message || data?.detail || `HTTP ${res.status}`);
       const content = String(data?.choices?.[0]?.message?.content || '');
-      renderContent(assistantBubble, content, false);
-      chatMessages = [...retryMessages, { role: 'assistant', content }];
+      renderAssistantBubble(assistantBubble, content);
+      chatMessages = [...retryMessages, { role: 'assistant', content: stripThinkSegments(content) }];
     }
     attachAssistantRetryAction(assistantBubble);
   } catch (e) {
@@ -999,7 +1103,7 @@ async function sendChat() {
       if (res.status === 401) throw new Error('API Key 无效或未授权');
       if (!res.ok) throw new Error(data?.error?.message || data?.detail || `HTTP ${res.status}`);
       const content = data?.choices?.[0]?.message?.content || '';
-      chatMessages.push({ role: 'assistant', content });
+      chatMessages.push({ role: 'assistant', content: stripThinkSegments(content) });
       const assistantBubble = showUserMsg('assistant', content);
       attachAssistantRetryAction(assistantBubble);
     }
@@ -1034,7 +1138,7 @@ async function streamChat(body, bubbleEl, commitHistory = true) {
       if (!line.startsWith('data:')) continue;
       const payload = line.slice(5).trim();
       if (payload === '[DONE]') {
-        if (commitHistory) chatMessages.push({ role: 'assistant', content: acc });
+        if (commitHistory) chatMessages.push({ role: 'assistant', content: stripThinkSegments(acc) });
         return acc;
       }
       try {
@@ -1042,14 +1146,14 @@ async function streamChat(body, bubbleEl, commitHistory = true) {
         const delta = obj?.choices?.[0]?.delta?.content;
         if (typeof delta === 'string' && delta) {
           acc += delta;
-          renderContent(bubbleEl, acc, false);
+          renderAssistantBubble(bubbleEl, acc);
           q('chat-messages').scrollTop = q('chat-messages').scrollHeight;
         }
       } catch (e) {}
     }
   }
 
-  if (commitHistory) chatMessages.push({ role: 'assistant', content: acc });
+  if (commitHistory) chatMessages.push({ role: 'assistant', content: stripThinkSegments(acc) });
   return acc;
 }
 
@@ -1296,7 +1400,7 @@ async function generateVideo() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error?.message || data?.detail || `HTTP ${res.status}`);
       const content = data?.choices?.[0]?.message?.content || '';
-      renderContent(bubble, content, false);
+      renderAssistantBubble(bubble, content);
     }
 
     videoAttachments.forEach((a) => {
@@ -1336,7 +1440,7 @@ async function streamVideo(body, bubbleEl) {
         const delta = obj?.choices?.[0]?.delta?.content;
         if (typeof delta === 'string' && delta) {
           acc += delta;
-          renderContent(bubbleEl, acc, false);
+          renderAssistantBubble(bubbleEl, acc);
         }
       } catch (e) {}
     }

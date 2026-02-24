@@ -35,6 +35,7 @@ const LOCALE_MAP = {
     "temporary": { title: "临时对话", desc: "是否启用临时对话模式。" },
     "stream": { title: "流式响应", desc: "是否默认启用流式输出。" },
     "thinking": { title: "思维链", desc: "是否启用模型思维链输出。" },
+    "show_search": { title: "显示搜索过程", desc: "是否在思维链中展示搜索查询与结果数量（需开启思维链）。" },
     "dynamic_statsig": { title: "动态指纹", desc: "是否启用动态生成 Statsig 值。" },
     "filter_tags": { title: "过滤标签", desc: "自动过滤 Grok 响应中的特殊标签。" },
     "video_poster_preview": { title: "视频海报预览", desc: "启用后会将返回内容中的 <video> 标签替换为带播放按钮的 Poster 预览图；点击预览图会在新标签页打开视频（默认关闭）。" },

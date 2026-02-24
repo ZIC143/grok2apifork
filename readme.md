@@ -171,6 +171,11 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml config
   - 旧版缓存目录：`data/temp/{image,video}` -> `data/tmp/{image,video}`
   - 旧账号一次性修复（best-effort）：升级后会对现有 Token 自动执行一次「同意用户协议 + 设置年龄 + 开启 NSFW」（并发 10）
 
+### 思考/搜索过程展示开关
+
+- `grok.thinking`：是否输出推理过程（`<think>...</think>`）。
+- `grok.show_search`：是否在推理过程中展示搜索查询与结果数量（仅在 `grok.thinking=true` 时生效）。
+
 
 ### 可用次数
 

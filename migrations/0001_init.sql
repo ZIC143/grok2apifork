@@ -84,7 +84,7 @@ VALUES
   ),
   (
     'grok',
-    '{"api_key":"","proxy_url":"","proxy_pool_url":"","proxy_pool_interval":300,"cache_proxy_url":"","cf_clearance":"","x_statsig_id":"","dynamic_statsig":true,"filtered_tags":"xaiartifact,xai:tool_usage_card","show_thinking":true,"temporary":false,"stream_first_response_timeout":30,"stream_chunk_timeout":120,"stream_total_timeout":600,"retry_status_codes":[401,429]}',
+    '{"api_key":"","proxy_url":"","proxy_pool_url":"","proxy_pool_interval":300,"cache_proxy_url":"","cf_clearance":"","x_statsig_id":"","dynamic_statsig":true,"filtered_tags":"xaiartifact,xai:tool_usage_card","show_thinking":true,"show_search":true,"temporary":false,"stream_first_response_timeout":30,"stream_chunk_timeout":120,"stream_total_timeout":600,"retry_status_codes":[401,429]}',
     CAST(strftime('%s','now') AS INTEGER) * 1000
   );
 

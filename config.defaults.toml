@@ -2,6 +2,7 @@
 temporary = true
 stream = true
 thinking = true
+show_search = true
 dynamic_statsig = true
 filter_tags = ["xaiartifact","xai:tool_usage_card","grok:render"]
 video_poster_preview = false

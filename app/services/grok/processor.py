@@ -5,6 +5,7 @@ import time
 import uuid
 import random
 import html
+import re
 import orjson
 from typing import Any, AsyncGenerator, Optional, AsyncIterable, List
 
@@ -121,11 +122,84 @@ class StreamProcessor(BaseProcessor):
         self._reasoning_text: str = ""
         self.filter_tags = get_config("grok.filter_tags", [])
         self.image_format = get_config("app.image_format", "url")
+        self.show_search = bool(get_config("grok.show_search", True))
+        self._think_opened: bool = False
+        self._search_query_seen: set[str] = set()
+        self._search_results_seen: set[str] = set()
+        self._search_result_limit: int = 6
+        self._search_preview_limit: int = 200
         
         if think is None:
             self.show_think = get_config("grok.thinking", False)
         else:
             self.show_think = think
+        if not self.show_think:
+            self.show_search = False
+
+    def _normalize_search_text(self, value: Any, limit: int) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            return ""
+        if limit > 0 and len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def _escape_markdown(self, text: str) -> str:
+        return re.sub(r"([\\\[\]\(\)])", r"\\\\\1", text or "")
+
+    def _normalize_search_url(self, value: Any) -> str:
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("/")):
+            return ""
+        return url.replace(" ", "%20").replace(")", "%29")
+
+    def _format_search_results(self, results: list[dict]) -> str:
+        if not results:
+            return ""
+        limit = max(1, min(10, int(self._search_result_limit or 6)))
+        lines: list[str] = []
+        for item in results[:limit]:
+            title = self._normalize_search_text(item.get("title"), 200) or self._normalize_search_text(item.get("url"), 200)
+            url = self._normalize_search_url(item.get("url"))
+            preview = self._normalize_search_text(item.get("preview"), self._search_preview_limit)
+            if url:
+                title_safe = self._escape_markdown(title or "link")
+                preview_safe = self._escape_markdown(preview.replace('"', "'")) if preview else ""
+                suffix = f' "{preview_safe}"' if preview_safe else ""
+                lines.append(f"- [{title_safe}]({url}{suffix})")
+            elif title:
+                lines.append(f"- {self._escape_markdown(title)}")
+        return "\n".join(lines)
+
+    def _extract_tool_usage(self, token_text: str) -> tuple[str, dict] | None:
+        if not token_text:
+            return None
+        tool_match = re.search(r"<xai:tool_name>([^<]+)</xai:tool_name>", token_text)
+        tool_name = tool_match.group(1) if tool_match else ""
+        args_match = re.search(r"<!\[CDATA\[([\s\S]*?)\]\]>", token_text)
+        args: dict = {}
+        if args_match:
+            try:
+                args = orjson.loads(args_match.group(1)) or {}
+            except Exception:
+                args = {}
+        if not tool_name and not args:
+            return None
+        return tool_name, args
+
+    def _emit_search_text(self, text: str, current_is_thinking: bool) -> str:
+        if not text or not self.show_think:
+            return ""
+        output = text
+        if not self._think_opened:
+            output = f"<think>\n{output}"
+            self._think_opened = True
+        if not current_is_thinking:
+            output = f"{output}</think>\n"
+            self._think_opened = False
+        return output
     
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """处理流式响应"""
@@ -198,16 +272,99 @@ class StreamProcessor(BaseProcessor):
                 
                 # 普通 token
                 if (token := resp.get("token")) is not None:
-                    if token and not (self.filter_tags and any(t in token for t in self.filter_tags)):
-                        yield self._sse(token)
-                        if self.think_opened and self.show_think:
-                            self._reasoning_text += token
+                    if token and isinstance(token, str):
+                        current_is_thinking = bool(resp.get("isThinking"))
+                        message_tag = resp.get("messageTag")
+                        rollout_id = resp.get("rolloutId") or ""
+                        tool_usage_card_id = resp.get("toolUsageCardId") or ""
+
+                        # 搜索过程：工具卡
+                        if self.show_search and message_tag == "tool_usage_card":
+                            parsed = self._extract_tool_usage(token)
+                            if parsed:
+                                tool_name, args = parsed
+                                if tool_name == "web_search":
+                                    query = self._normalize_search_text(args.get("query"), 200)
+                                    if query:
+                                        key = f"{rollout_id or tool_usage_card_id}|{query}"
+                                        if key not in self._search_query_seen:
+                                            self._search_query_seen.add(key)
+                                            prefix = f"[{rollout_id}] " if rollout_id else ""
+                                            msg = f"{prefix}🔍 搜索: {query}\n"
+                                            out = self._emit_search_text(msg, current_is_thinking)
+                                            if out:
+                                                yield self._sse(out)
+                                                self._reasoning_text += out
+                            continue
+
+                        # 搜索过程：函数结果
+                        if self.show_search and message_tag == "raw_function_result":
+                            web_results = resp.get("webSearchResults")
+                            results_list: list[dict] = []
+                            if isinstance(web_results, dict) and isinstance(web_results.get("results"), list):
+                                results_list = web_results.get("results") or []
+                            elif isinstance(web_results, list):
+                                results_list = web_results
+                            if results_list:
+                                key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                                if key not in self._search_results_seen:
+                                    self._search_results_seen.add(key)
+                                    prefix = f"[{rollout_id}] " if rollout_id else ""
+                                    list_md = self._format_search_results(results_list)
+                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    if list_md:
+                                        msg += f"{list_md}\n"
+                                    out = self._emit_search_text(msg, current_is_thinking)
+                                    if out:
+                                        yield self._sse(out)
+                                        self._reasoning_text += out
+                            continue
+
+                        # 搜索过程：无 messageTag 但带结果
+                        if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
+                            results_list = resp.get("webSearchResults").get("results") or []
+                            if results_list:
+                                key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                                if key not in self._search_results_seen:
+                                    self._search_results_seen.add(key)
+                                    prefix = f"[{rollout_id}] " if rollout_id else ""
+                                    list_md = self._format_search_results(results_list)
+                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    if list_md:
+                                        msg += f"{list_md}\n"
+                                    out = self._emit_search_text(msg, current_is_thinking)
+                                    if out:
+                                        yield self._sse(out)
+                                        self._reasoning_text += out
+                            continue
+
+                        if self.filter_tags and any(t in token for t in self.filter_tags):
+                            continue
+
+                        # 推理包裹
+                        out_token = token
+                        if current_is_thinking:
+                            if self.show_think and not self._think_opened:
+                                out_token = f"<think>\n{out_token}"
+                                self._think_opened = True
+                            elif not self.show_think:
+                                continue
+                        elif self._think_opened and self.show_think:
+                            out_token = f"\n</think>\n{out_token}"
+                            self._think_opened = False
+
+                        yield self._sse(out_token)
+                        if self._think_opened and self.show_think:
+                            self._reasoning_text += out_token
                         else:
-                            self._output_text += token
+                            self._output_text += out_token
                         
             if self.think_opened:
                 yield self._sse("</think>\n")
                 self.think_opened = False
+            if self._think_opened:
+                yield self._sse("\n</think>\n")
+                self._think_opened = False
             yield self._sse(finish="stop")
             yield "data: [DONE]\n\n"
         except Exception as e:
@@ -227,12 +384,90 @@ class CollectProcessor(BaseProcessor):
     def __init__(self, model: str, token: str = ""):
         super().__init__(model, token)
         self.image_format = get_config("app.image_format", "url")
+        self.filter_tags = get_config("grok.filter_tags", [])
+        self.show_think = get_config("grok.thinking", False)
+        self.show_search = bool(get_config("grok.show_search", True))
+        if not self.show_think:
+            self.show_search = False
+        self._think_opened = False
+        self._search_query_seen: set[str] = set()
+        self._search_results_seen: set[str] = set()
+        self._search_result_limit: int = 6
+        self._search_preview_limit: int = 200
+
+    def _normalize_search_text(self, value: Any, limit: int) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            return ""
+        if limit > 0 and len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def _escape_markdown(self, text: str) -> str:
+        return re.sub(r"([\\\[\]\(\)])", r"\\\\\1", text or "")
+
+    def _normalize_search_url(self, value: Any) -> str:
+        url = str(value or "").strip()
+        if not url:
+            return ""
+        if not (url.startswith("http://") or url.startswith("https://") or url.startswith("/")):
+            return ""
+        return url.replace(" ", "%20").replace(")", "%29")
+
+    def _format_search_results(self, results: list[dict]) -> str:
+        if not results:
+            return ""
+        limit = max(1, min(10, int(self._search_result_limit or 6)))
+        lines: list[str] = []
+        for item in results[:limit]:
+            title = self._normalize_search_text(item.get("title"), 200) or self._normalize_search_text(item.get("url"), 200)
+            url = self._normalize_search_url(item.get("url"))
+            preview = self._normalize_search_text(item.get("preview"), self._search_preview_limit)
+            if url:
+                title_safe = self._escape_markdown(title or "link")
+                preview_safe = self._escape_markdown(preview.replace('"', "'")) if preview else ""
+                suffix = f' "{preview_safe}"' if preview_safe else ""
+                lines.append(f"- [{title_safe}]({url}{suffix})")
+            elif title:
+                lines.append(f"- {self._escape_markdown(title)}")
+        return "\n".join(lines)
+
+    def _extract_tool_usage(self, token_text: str) -> tuple[str, dict] | None:
+        if not token_text:
+            return None
+        tool_match = re.search(r"<xai:tool_name>([^<]+)</xai:tool_name>", token_text)
+        tool_name = tool_match.group(1) if tool_match else ""
+        args_match = re.search(r"<!\[CDATA\[([\s\S]*?)\]\]>", token_text)
+        args: dict = {}
+        if args_match:
+            try:
+                args = orjson.loads(args_match.group(1)) or {}
+            except Exception:
+                args = {}
+        if not tool_name and not args:
+            return None
+        return tool_name, args
+
+    def _emit_search_text(self, text: str, current_is_thinking: bool) -> str:
+        if not text or not self.show_think:
+            return ""
+        output = text
+        if not self._think_opened:
+            output = f"<think>\n{output}"
+            self._think_opened = True
+        if not current_is_thinking:
+            output = f"{output}</think>\n"
+            self._think_opened = False
+        return output
     
     async def process(self, response: AsyncIterable[bytes], prompt_messages: Optional[list[dict]] = None) -> dict[str, Any]:
         """处理并收集完整响应"""
         response_id = ""
         fingerprint = ""
         content = ""
+        saw_token = False
+        is_thinking = False
+        thinking_finished = False
         
         try:
             async for line in response:
@@ -248,9 +483,104 @@ class CollectProcessor(BaseProcessor):
                 if (llm := resp.get("llmInfo")) and not fingerprint:
                     fingerprint = llm.get("modelHash", "")
                 
+                if (token := resp.get("token")) is not None and isinstance(token, str):
+                    current_is_thinking = bool(resp.get("isThinking"))
+                    message_tag = resp.get("messageTag")
+                    rollout_id = resp.get("rolloutId") or ""
+                    tool_usage_card_id = resp.get("toolUsageCardId") or ""
+                    if thinking_finished and current_is_thinking:
+                        is_thinking = current_is_thinking
+                        continue
+
+                    if self.show_search and message_tag == "tool_usage_card":
+                        parsed = self._extract_tool_usage(token)
+                        if parsed:
+                            tool_name, args = parsed
+                            if tool_name == "web_search":
+                                query = self._normalize_search_text(args.get("query"), 200)
+                                if query:
+                                    key = f"{rollout_id or tool_usage_card_id}|{query}"
+                                    if key not in self._search_query_seen:
+                                        self._search_query_seen.add(key)
+                                        prefix = f"[{rollout_id}] " if rollout_id else ""
+                                        msg = f"{prefix}🔍 搜索: {query}\n"
+                                        out = self._emit_search_text(msg, current_is_thinking)
+                                        if out:
+                                            content += out
+                                            saw_token = True
+                        if is_thinking and not current_is_thinking:
+                            thinking_finished = True
+                        is_thinking = current_is_thinking
+                        continue
+
+                    if self.show_search and message_tag == "raw_function_result":
+                        web_results = resp.get("webSearchResults")
+                        results_list: list[dict] = []
+                        if isinstance(web_results, dict) and isinstance(web_results.get("results"), list):
+                            results_list = web_results.get("results") or []
+                        elif isinstance(web_results, list):
+                            results_list = web_results
+                        if results_list:
+                            key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                            if key not in self._search_results_seen:
+                                self._search_results_seen.add(key)
+                                prefix = f"[{rollout_id}] " if rollout_id else ""
+                                list_md = self._format_search_results(results_list)
+                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, current_is_thinking)
+                                if out:
+                                    content += out
+                                    saw_token = True
+                        if is_thinking and not current_is_thinking:
+                            thinking_finished = True
+                        is_thinking = current_is_thinking
+                        continue
+
+                    if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
+                        results_list = resp.get("webSearchResults").get("results") or []
+                        if results_list:
+                            key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                            if key not in self._search_results_seen:
+                                self._search_results_seen.add(key)
+                                prefix = f"[{rollout_id}] " if rollout_id else ""
+                                list_md = self._format_search_results(results_list)
+                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, current_is_thinking)
+                                if out:
+                                    content += out
+                                    saw_token = True
+                        if is_thinking and not current_is_thinking:
+                            thinking_finished = True
+                        is_thinking = current_is_thinking
+                        continue
+
+                    if self.filter_tags and any(t in token for t in self.filter_tags):
+                        continue
+
+                    out_token = token
+                    if current_is_thinking:
+                        if self.show_think and not self._think_opened:
+                            out_token = f"<think>\n{out_token}"
+                            self._think_opened = True
+                        elif not self.show_think:
+                            continue
+                    elif self._think_opened and self.show_think:
+                        out_token = f"\n</think>\n{out_token}"
+                        self._think_opened = False
+                        if is_thinking:
+                            thinking_finished = True
+                    content += out_token
+                    saw_token = True
+                    is_thinking = current_is_thinking
+
                 if mr := resp.get("modelResponse"):
                     response_id = mr.get("responseId", "")
-                    content = mr.get("message", "")
+                    if not saw_token and isinstance(mr.get("message"), str):
+                        content = mr.get("message", "")
                     
                     if urls := mr.get("generatedImageUrls"):
                         content += "\n"
@@ -278,6 +608,9 @@ class CollectProcessor(BaseProcessor):
         finally:
             await self.close()
         
+        if self.show_think and self._think_opened:
+            content += "\n</think>\n"
+            self._think_opened = False
         usage = build_chat_usage(prompt_messages or [], content)
         return {
             "id": response_id,

@@ -299,6 +299,7 @@ adminRoutes.get("/api/v1/admin/config", requireAdminAuth, async (c) => {
         temporary: Boolean(settings.grok.temporary),
         stream: true,
         thinking: Boolean(settings.grok.show_thinking),
+        show_search: Boolean(settings.grok.show_search),
         dynamic_statsig: Boolean(settings.grok.dynamic_statsig),
         filter_tags: filterTags,
         video_poster_preview: Boolean(settings.grok.video_poster_preview),
@@ -372,6 +373,7 @@ adminRoutes.post("/api/v1/admin/config", requireAdminAuth, async (c) => {
       }
       if (typeof grokCfg.dynamic_statsig === "boolean") grok_config.dynamic_statsig = grokCfg.dynamic_statsig;
       if (typeof grokCfg.thinking === "boolean") grok_config.show_thinking = grokCfg.thinking;
+      if (typeof grokCfg.show_search === "boolean") grok_config.show_search = grokCfg.show_search;
       if (typeof grokCfg.temporary === "boolean") grok_config.temporary = grokCfg.temporary;
       if (typeof grokCfg.video_poster_preview === "boolean") grok_config.video_poster_preview = grokCfg.video_poster_preview;
       if (Array.isArray(grokCfg.retry_status_codes))
