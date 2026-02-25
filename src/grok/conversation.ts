@@ -146,7 +146,7 @@ export function buildConversationPayload(args: {
       toolOverrides: {},
       enableSideBySide: true,
       sendFinalMetadata: true,
-      isReasoning: false,
+      isReasoning: settings.show_thinking !== false,
       webpageUrls: [],
       disableTextFollowUps: true,
       responseMetadata: { requestModelDetails: { modelId: grokModel } },

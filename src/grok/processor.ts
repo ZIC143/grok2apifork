@@ -199,6 +199,26 @@ function parseToolUsageCardToken(raw: string): { toolName: string; args: Record<
   return { toolName, args };
 }
 
+function isWebSearchTool(name: string): boolean {
+  const tool = String(name || "").toLowerCase();
+  return tool.startsWith("web_search");
+}
+
+function extractToolUsageCardsFromText(raw: unknown): Array<{ toolName: string; args: Record<string, unknown> }> {
+  const text = String(raw ?? "");
+  if (!text) return [];
+  const matches = text.match(/<xai:tool_usage_card>[\s\S]*?<\/xai:tool_usage_card>/gi);
+  if (matches && matches.length) {
+    const parsed = matches.map((m) => parseToolUsageCardToken(m)).filter(Boolean) as Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+    }>;
+    return parsed;
+  }
+  const single = parseToolUsageCardToken(text);
+  return single ? [single] : [];
+}
+
 export function createOpenAiStreamFromGrokNdjson(
   grokResp: Response,
   opts: {
@@ -231,7 +251,7 @@ export function createOpenAiStreamFromGrokNdjson(
     .map((t) => t.trim())
     .filter(Boolean);
   const showThinking = settings.show_thinking !== false;
-  const showSearch = showThinking && settings.show_search !== false;
+  const showSearch = settings.show_search !== false;
 
   const firstTimeoutMs = Math.max(0, (settings.stream_first_response_timeout ?? 30) * 1000);
   const chunkTimeoutMs = Math.max(0, (settings.stream_chunk_timeout ?? 120) * 1000);
@@ -403,6 +423,231 @@ export function createOpenAiStreamFromGrokNdjson(
 
             if (grok.imageAttachmentInfo) isImage = true;
             const rawToken = grok.token;
+            const currentIsThinking = Boolean(grok.isThinking);
+            const wasThinking = isThinking;
+            const messageTag = grok.messageTag;
+            const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
+            const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
+
+            if (showSearch && grok.modelResponse) {
+              const modelResp = grok.modelResponse;
+              if (Array.isArray(modelResp.steps)) {
+                for (const step of modelResp.steps) {
+                  if (!step || typeof step !== "object") continue;
+                  const stepTags = Array.isArray((step as any).tags) ? (step as any).tags : [];
+                  const stepRolloutId = typeof (step as any).rolloutId === "string" ? (step as any).rolloutId : rolloutId;
+                  const stepToolUsageId =
+                    typeof (step as any).toolUsageCardId === "string" ? (step as any).toolUsageCardId : toolUsageCardId;
+                  const prefix = stepRolloutId ? `[${stepRolloutId}] ` : "";
+
+                  const toolTextParts = Array.isArray((step as any).text) ? (step as any).text : [];
+                  for (const rawText of toolTextParts) {
+                    const cards = extractToolUsageCardsFromText(rawText);
+                    for (const card of cards) {
+                      if (!isWebSearchTool(card.toolName)) continue;
+                      const query = normalizeSearchText((card.args as any)?.query, 200);
+                      if (!query) continue;
+                      const dedupeKey = `${stepRolloutId || stepToolUsageId}|${query}`;
+                      if (seenSearchQueries.has(dedupeKey)) continue;
+                      seenSearchQueries.add(dedupeKey);
+                      let msg = `${prefix}🔍 搜索: ${query}\n`;
+                      if (showThinking) {
+                        if (!thinkOpened) {
+                          msg = `<think>\n${msg}`;
+                          thinkOpened = true;
+                        }
+                        if (!currentIsThinking) {
+                          msg = `${msg}</think>\n`;
+                          thinkOpened = false;
+                        }
+                      }
+                      completionText += msg;
+                      controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                    }
+                  }
+
+                  if (Array.isArray((step as any).webSearchResults) || (step as any).webSearchResults?.results) {
+                    const results = extractSearchResults((step as any).webSearchResults);
+                    if (results.length) {
+                      const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+                      if (!seenSearchResults.has(resultsKey)) {
+                        seenSearchResults.add(resultsKey);
+                        const list = formatSearchResults(results);
+                        let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                        if (list) msg += `${list}\n`;
+                        if (showThinking) {
+                          if (!thinkOpened) {
+                            msg = `<think>\n${msg}`;
+                            thinkOpened = true;
+                          }
+                          if (!currentIsThinking) {
+                            msg = `${msg}</think>\n`;
+                            thinkOpened = false;
+                          }
+                        }
+                        completionText += msg;
+                        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                      }
+                    }
+                  }
+
+                  const usageResults = Array.isArray((step as any).toolUsageResults) ? (step as any).toolUsageResults : [];
+                  for (const usage of usageResults) {
+                    if (!usage || typeof usage !== "object") continue;
+                    if (!(usage as any).webSearchResults) continue;
+                    const results = extractSearchResults((usage as any).webSearchResults);
+                    if (!results.length) continue;
+                    const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+                    if (seenSearchResults.has(resultsKey)) continue;
+                    seenSearchResults.add(resultsKey);
+                    const list = formatSearchResults(results);
+                    let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                    if (list) msg += `${list}\n`;
+                    if (showThinking) {
+                      if (!thinkOpened) {
+                        msg = `<think>\n${msg}`;
+                        thinkOpened = true;
+                      }
+                      if (!currentIsThinking) {
+                        msg = `${msg}</think>\n`;
+                        thinkOpened = false;
+                      }
+                    }
+                    completionText += msg;
+                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                  }
+
+                  if (stepTags.includes("raw_function_result") && (step as any).webSearchResults) {
+                    const results = extractSearchResults((step as any).webSearchResults);
+                    if (results.length) {
+                      const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+                      if (!seenSearchResults.has(resultsKey)) {
+                        seenSearchResults.add(resultsKey);
+                        const list = formatSearchResults(results);
+                        let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                        if (list) msg += `${list}\n`;
+                        if (showThinking) {
+                          if (!thinkOpened) {
+                            msg = `<think>\n${msg}`;
+                            thinkOpened = true;
+                          }
+                          if (!currentIsThinking) {
+                            msg = `${msg}</think>\n`;
+                            thinkOpened = false;
+                          }
+                        }
+                        completionText += msg;
+                        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (Array.isArray(modelResp.webSearchResults) || modelResp.webSearchResults?.results) {
+                const results = extractSearchResults(modelResp.webSearchResults);
+                if (results.length) {
+                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+                  if (!seenSearchResults.has(resultsKey)) {
+                    seenSearchResults.add(resultsKey);
+                    const list = formatSearchResults(results);
+                    let msg = `📄 找到 ${results.length} 条结果\n`;
+                    if (list) msg += `${list}\n`;
+                    if (showThinking) {
+                      if (!thinkOpened) {
+                        msg = `<think>\n${msg}`;
+                        thinkOpened = true;
+                      }
+                      if (!currentIsThinking) {
+                        msg = `${msg}</think>\n`;
+                        thinkOpened = false;
+                      }
+                    }
+                    completionText += msg;
+                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                  }
+                }
+              }
+
+              if (Array.isArray(modelResp.toolUsageResults)) {
+                for (const usage of modelResp.toolUsageResults) {
+                  if (!usage || typeof usage !== "object") continue;
+                  if (!(usage as any).webSearchResults) continue;
+                  const results = extractSearchResults((usage as any).webSearchResults);
+                  if (!results.length) continue;
+                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+                  if (seenSearchResults.has(resultsKey)) continue;
+                  seenSearchResults.add(resultsKey);
+                  const list = formatSearchResults(results);
+                  let msg = `📄 找到 ${results.length} 条结果\n`;
+                  if (list) msg += `${list}\n`;
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                    }
+                    if (!currentIsThinking) {
+                      msg = `${msg}</think>\n`;
+                      thinkOpened = false;
+                    }
+                  }
+                  completionText += msg;
+                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                }
+              }
+
+              if (Array.isArray(modelResp.webSearchResults) || modelResp.webSearchResults?.results) {
+                const results = extractSearchResults(modelResp.webSearchResults);
+                if (results.length) {
+                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+                  if (!seenSearchResults.has(resultsKey)) {
+                    seenSearchResults.add(resultsKey);
+                    const list = formatSearchResults(results);
+                    let msg = `📄 找到 ${results.length} 条结果\n`;
+                    if (list) msg += `${list}\n`;
+                    if (showThinking) {
+                      if (!thinkOpened) {
+                        msg = `<think>\n${msg}`;
+                        thinkOpened = true;
+                      }
+                      if (!currentIsThinking) {
+                        msg = `${msg}</think>\n`;
+                        thinkOpened = false;
+                      }
+                    }
+                    completionText += msg;
+                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                  }
+                }
+              }
+
+              if (Array.isArray(modelResp.toolUsageResults)) {
+                for (const usage of modelResp.toolUsageResults) {
+                  if (!usage || typeof usage !== "object") continue;
+                  if (!(usage as any).webSearchResults) continue;
+                  const results = extractSearchResults((usage as any).webSearchResults);
+                  if (!results.length) continue;
+                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+                  if (seenSearchResults.has(resultsKey)) continue;
+                  seenSearchResults.add(resultsKey);
+                  const list = formatSearchResults(results);
+                  let msg = `📄 找到 ${results.length} 条结果\n`;
+                  if (list) msg += `${list}\n`;
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                    }
+                    if (!currentIsThinking) {
+                      msg = `${msg}</think>\n`;
+                      thinkOpened = false;
+                    }
+                  }
+                  completionText += msg;
+                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                }
+              }
+            }
 
             if (isImage) {
               const modelResp = grok.modelResponse;
@@ -430,24 +675,27 @@ export function createOpenAiStreamFromGrokNdjson(
             }
 
             // Text chat stream
-            if (Array.isArray(rawToken)) continue;
-            if (typeof rawToken !== "string" || !rawToken) continue;
+            if (Array.isArray(rawToken)) {
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
+              continue;
+            }
+            if (typeof rawToken !== "string" || !rawToken) {
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
+              continue;
+            }
             let token = rawToken;
-
-            const currentIsThinking = Boolean(grok.isThinking);
-            const wasThinking = isThinking;
-            const messageTag = grok.messageTag;
-            const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
-            const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
 
             if (thinkingFinished && currentIsThinking) {
               isThinking = currentIsThinking;
               continue;
             }
 
+
             if (showSearch && messageTag === "tool_usage_card") {
               const parsed = parseToolUsageCardToken(token);
-              if (parsed && parsed.toolName === "web_search") {
+              if (parsed && isWebSearchTool(parsed.toolName)) {
                 const queryRaw = (parsed.args as any)?.query;
                 const query = normalizeSearchText(queryRaw, 200);
                 if (query) {
@@ -658,7 +906,7 @@ export async function parseOpenAiFromGrokNdjson(
     .map((t) => t.trim())
     .filter(Boolean);
   const showThinking = settings.show_thinking !== false;
-  const showSearch = showThinking && settings.show_search !== false;
+  const showSearch = settings.show_search !== false;
   let sawToken = false;
   let isThinking = false;
   let thinkOpened = false;
@@ -710,19 +958,20 @@ export async function parseOpenAiFromGrokNdjson(
     if (typeof userRespModel === "string" && userRespModel.trim()) model = userRespModel.trim();
 
     const rawToken = grok.token ?? result?.token;
+    const currentIsThinking = Boolean(grok.isThinking ?? result?.isThinking);
+    const wasThinking = isThinking;
+    const messageTag = grok.messageTag ?? result?.messageTag;
+    const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : (typeof result?.rolloutId === "string" ? result.rolloutId : "");
+    const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : (typeof result?.toolUsageCardId === "string" ? result.toolUsageCardId : "");
+
     if (typeof rawToken === "string" && rawToken) {
       let token = rawToken;
-      const currentIsThinking = Boolean(grok.isThinking ?? result?.isThinking);
-      const wasThinking = isThinking;
-      const messageTag = grok.messageTag ?? result?.messageTag;
-      const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : (typeof result?.rolloutId === "string" ? result.rolloutId : "");
-      const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : (typeof result?.toolUsageCardId === "string" ? result.toolUsageCardId : "");
 
       if (thinkingFinished && currentIsThinking) {
         isThinking = currentIsThinking;
       } else if (showSearch && messageTag === "tool_usage_card") {
         const parsed = parseToolUsageCardToken(token);
-        if (parsed && parsed.toolName === "web_search") {
+        if (parsed && isWebSearchTool(parsed.toolName)) {
           const queryRaw = (parsed.args as any)?.query;
           const query = normalizeSearchText(queryRaw, 200);
           if (query) {
@@ -827,8 +1076,171 @@ export async function parseOpenAiFromGrokNdjson(
       }
     }
 
-    const modelResp = grok.modelResponse;
+    const modelResp = grok.modelResponse ?? result?.modelResponse;
     if (!modelResp) continue;
+    if (showSearch && Array.isArray(modelResp.steps)) {
+      for (const step of modelResp.steps) {
+        if (!step || typeof step !== "object") continue;
+        const stepTags = Array.isArray((step as any).tags) ? (step as any).tags : [];
+        const stepRolloutId = typeof (step as any).rolloutId === "string" ? (step as any).rolloutId : rolloutId;
+        const stepToolUsageId = typeof (step as any).toolUsageCardId === "string" ? (step as any).toolUsageCardId : toolUsageCardId;
+        const prefix = stepRolloutId ? `[${stepRolloutId}] ` : "";
+
+        const toolTextParts = Array.isArray((step as any).text) ? (step as any).text : [];
+        for (const rawText of toolTextParts) {
+          const cards = extractToolUsageCardsFromText(rawText);
+          for (const card of cards) {
+            if (!isWebSearchTool(card.toolName)) continue;
+            const query = normalizeSearchText((card.args as any)?.query, 200);
+            if (!query) continue;
+            const dedupeKey = `${stepRolloutId || stepToolUsageId}|${query}`;
+            if (seenSearchQueries.has(dedupeKey)) continue;
+            seenSearchQueries.add(dedupeKey);
+            let msg = `${prefix}🔍 搜索: ${query}\n`;
+            if (showThinking) {
+              if (!thinkOpened) {
+                msg = `<think>\n${msg}`;
+                thinkOpened = true;
+              }
+              if (!currentIsThinking) {
+                msg = `${msg}</think>\n`;
+                thinkOpened = false;
+              }
+            }
+            appendText(msg);
+            sawToken = true;
+          }
+        }
+
+        if (Array.isArray((step as any).webSearchResults) || (step as any).webSearchResults?.results) {
+          const results = extractSearchResults((step as any).webSearchResults);
+          if (results.length) {
+            const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+            if (!seenSearchResults.has(resultsKey)) {
+              seenSearchResults.add(resultsKey);
+              const list = formatSearchResults(results);
+              let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+              if (list) msg += `${list}\n`;
+              if (showThinking) {
+                if (!thinkOpened) {
+                  msg = `<think>\n${msg}`;
+                  thinkOpened = true;
+                }
+                if (!currentIsThinking) {
+                  msg = `${msg}</think>\n`;
+                  thinkOpened = false;
+                }
+              }
+              appendText(msg);
+              sawToken = true;
+            }
+          }
+        }
+
+        const usageResults = Array.isArray((step as any).toolUsageResults) ? (step as any).toolUsageResults : [];
+        for (const usage of usageResults) {
+          if (!usage || typeof usage !== "object") continue;
+          if (!(usage as any).webSearchResults) continue;
+          const results = extractSearchResults((usage as any).webSearchResults);
+          if (!results.length) continue;
+          const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+          if (seenSearchResults.has(resultsKey)) continue;
+          seenSearchResults.add(resultsKey);
+          const list = formatSearchResults(results);
+          let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+          if (list) msg += `${list}\n`;
+          if (showThinking) {
+            if (!thinkOpened) {
+              msg = `<think>\n${msg}`;
+              thinkOpened = true;
+            }
+            if (!currentIsThinking) {
+              msg = `${msg}</think>\n`;
+              thinkOpened = false;
+            }
+          }
+          appendText(msg);
+          sawToken = true;
+        }
+
+        if (stepTags.includes("raw_function_result") && (step as any).webSearchResults) {
+          const results = extractSearchResults((step as any).webSearchResults);
+          if (results.length) {
+            const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+            if (!seenSearchResults.has(resultsKey)) {
+              seenSearchResults.add(resultsKey);
+              const list = formatSearchResults(results);
+              let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+              if (list) msg += `${list}\n`;
+              if (showThinking) {
+                if (!thinkOpened) {
+                  msg = `<think>\n${msg}`;
+                  thinkOpened = true;
+                }
+                if (!currentIsThinking) {
+                  msg = `${msg}</think>\n`;
+                  thinkOpened = false;
+                }
+              }
+              appendText(msg);
+              sawToken = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (showSearch && (Array.isArray(modelResp.webSearchResults) || modelResp.webSearchResults?.results)) {
+      const results = extractSearchResults(modelResp.webSearchResults);
+      if (results.length) {
+        const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+        if (!seenSearchResults.has(resultsKey)) {
+          seenSearchResults.add(resultsKey);
+          const list = formatSearchResults(results);
+          let msg = `📄 找到 ${results.length} 条结果\n`;
+          if (list) msg += `${list}\n`;
+          if (showThinking) {
+            if (!thinkOpened) {
+              msg = `<think>\n${msg}`;
+              thinkOpened = true;
+            }
+            if (!currentIsThinking) {
+              msg = `${msg}</think>\n`;
+              thinkOpened = false;
+            }
+          }
+          appendText(msg);
+          sawToken = true;
+        }
+      }
+    }
+
+    if (showSearch && Array.isArray(modelResp.toolUsageResults)) {
+      for (const usage of modelResp.toolUsageResults) {
+        if (!usage || typeof usage !== "object") continue;
+        if (!(usage as any).webSearchResults) continue;
+        const results = extractSearchResults((usage as any).webSearchResults);
+        if (!results.length) continue;
+        const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+        if (seenSearchResults.has(resultsKey)) continue;
+        seenSearchResults.add(resultsKey);
+        const list = formatSearchResults(results);
+        let msg = `📄 找到 ${results.length} 条结果\n`;
+        if (list) msg += `${list}\n`;
+        if (showThinking) {
+          if (!thinkOpened) {
+            msg = `<think>\n${msg}`;
+            thinkOpened = true;
+          }
+          if (!currentIsThinking) {
+            msg = `${msg}</think>\n`;
+            thinkOpened = false;
+          }
+        }
+        appendText(msg);
+        sawToken = true;
+      }
+    }
     if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
 
     if (typeof modelResp.model === "string" && modelResp.model) model = modelResp.model;

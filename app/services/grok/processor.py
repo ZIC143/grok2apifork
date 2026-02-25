@@ -122,7 +122,6 @@ class StreamProcessor(BaseProcessor):
         self._reasoning_text: str = ""
         self.filter_tags = get_config("grok.filter_tags", [])
         self.image_format = get_config("app.image_format", "url")
-        self.show_search = bool(get_config("grok.show_search", True))
         self._think_opened: bool = False
         self._search_query_seen: set[str] = set()
         self._search_results_seen: set[str] = set()
@@ -133,8 +132,7 @@ class StreamProcessor(BaseProcessor):
             self.show_think = get_config("grok.thinking", False)
         else:
             self.show_think = think
-        if not self.show_think:
-            self.show_search = False
+        self.show_search = bool(get_config("grok.show_search", True))
 
     def _normalize_search_text(self, value: Any, limit: int) -> str:
         text = " ".join(str(value or "").split()).strip()
@@ -189,9 +187,34 @@ class StreamProcessor(BaseProcessor):
             return None
         return tool_name, args
 
+    def _extract_tool_usage_cards(self, token_text: Any) -> list[tuple[str, dict]]:
+        text = str(token_text or "")
+        if not text:
+            return []
+        matches = re.findall(r"<xai:tool_usage_card>[\s\S]*?<\/xai:tool_usage_card>", text, flags=re.IGNORECASE)
+        if matches:
+            parsed: list[tuple[str, dict]] = []
+            for m in matches:
+                tool = self._extract_tool_usage(m)
+                if tool:
+                    parsed.append(tool)
+            return parsed
+        single = self._extract_tool_usage(text)
+        return [single] if single else []
+
+    def _extract_results_list(self, web_results: Any) -> list[dict]:
+        results_list: list[dict] = []
+        if isinstance(web_results, dict) and isinstance(web_results.get("results"), list):
+            results_list = web_results.get("results") or []
+        elif isinstance(web_results, list):
+            results_list = web_results
+        return results_list
+
     def _emit_search_text(self, text: str, current_is_thinking: bool) -> str:
-        if not text or not self.show_think:
+        if not text:
             return ""
+        if not self.show_think:
+            return text
         output = text
         if not self._think_opened:
             output = f"<think>\n{output}"
@@ -239,6 +262,99 @@ class StreamProcessor(BaseProcessor):
                 
                 # modelResponse
                 if mr := resp.get("modelResponse"):
+                    if self.show_search:
+                        steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
+                        for step in steps:
+                            if not isinstance(step, dict):
+                                continue
+                            step_tags = step.get("tags") if isinstance(step.get("tags"), list) else []
+                            step_rollout = step.get("rolloutId") or ""
+                            step_tool_id = step.get("toolUsageCardId") or ""
+                            prefix = f"[{step_rollout}] " if step_rollout else ""
+
+                            text_parts = step.get("text") if isinstance(step.get("text"), list) else []
+                            for raw_text in text_parts:
+                                for tool_name, args in self._extract_tool_usage_cards(raw_text):
+                                    if not tool_name.startswith("web_search"):
+                                        continue
+                                    query = self._normalize_search_text(args.get("query"), 200)
+                                    if not query:
+                                        continue
+                                    key = f"{step_rollout or step_tool_id}|{query}"
+                                    if key in self._search_query_seen:
+                                        continue
+                                    self._search_query_seen.add(key)
+                                    msg = f"{prefix}🔍 搜索: {query}\n"
+                                    out = self._emit_search_text(msg, False)
+                                    if out:
+                                        yield self._sse(out)
+                                        if self.show_think:
+                                            self._reasoning_text += out
+                                        else:
+                                            self._output_text += out
+
+                            step_results = step.get("webSearchResults")
+                            results_list = []
+                            if isinstance(step_results, dict) and isinstance(step_results.get("results"), list):
+                                results_list = step_results.get("results") or []
+                            elif isinstance(step_results, list):
+                                results_list = step_results
+                            if results_list:
+                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                if key not in self._search_results_seen:
+                                    self._search_results_seen.add(key)
+                                    list_md = self._format_search_results(results_list)
+                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    if list_md:
+                                        msg += f"{list_md}\n"
+                                    out = self._emit_search_text(msg, False)
+                                    if out:
+                                        yield self._sse(out)
+                                        if self.show_think:
+                                            self._reasoning_text += out
+                                        else:
+                                            self._output_text += out
+
+                            usage_results = step.get("toolUsageResults") if isinstance(step.get("toolUsageResults"), list) else []
+                            for usage in usage_results:
+                                if not isinstance(usage, dict) or not usage.get("webSearchResults"):
+                                    continue
+                                results_list = self._extract_results_list(usage.get("webSearchResults"))
+                                if not results_list:
+                                    continue
+                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                if key in self._search_results_seen:
+                                    continue
+                                self._search_results_seen.add(key)
+                                list_md = self._format_search_results(results_list)
+                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, False)
+                                if out:
+                                    yield self._sse(out)
+                                    if self.show_think:
+                                        self._reasoning_text += out
+                                    else:
+                                        self._output_text += out
+
+                            if "raw_function_result" in step_tags and step.get("webSearchResults"):
+                                results_list = self._extract_results_list(step.get("webSearchResults"))
+                                if results_list:
+                                    key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                    if key not in self._search_results_seen:
+                                        self._search_results_seen.add(key)
+                                        list_md = self._format_search_results(results_list)
+                                        msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                        if list_md:
+                                            msg += f"{list_md}\n"
+                                        out = self._emit_search_text(msg, False)
+                                        if out:
+                                            yield self._sse(out)
+                                            if self.show_think:
+                                                self._reasoning_text += out
+                                            else:
+                                                self._output_text += out
                     if self.think_opened and self.show_think:
                         if msg := mr.get("message"):
                             yield self._sse(msg + "\n")
@@ -283,7 +399,7 @@ class StreamProcessor(BaseProcessor):
                             parsed = self._extract_tool_usage(token)
                             if parsed:
                                 tool_name, args = parsed
-                                if tool_name == "web_search":
+                                if tool_name.startswith("web_search"):
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if query:
                                         key = f"{rollout_id or tool_usage_card_id}|{query}"
@@ -387,8 +503,6 @@ class CollectProcessor(BaseProcessor):
         self.filter_tags = get_config("grok.filter_tags", [])
         self.show_think = get_config("grok.thinking", False)
         self.show_search = bool(get_config("grok.show_search", True))
-        if not self.show_think:
-            self.show_search = False
         self._think_opened = False
         self._search_query_seen: set[str] = set()
         self._search_results_seen: set[str] = set()
@@ -449,8 +563,10 @@ class CollectProcessor(BaseProcessor):
         return tool_name, args
 
     def _emit_search_text(self, text: str, current_is_thinking: bool) -> str:
-        if not text or not self.show_think:
+        if not text:
             return ""
+        if not self.show_think:
+            return text
         output = text
         if not self._think_opened:
             output = f"<think>\n{output}"
@@ -496,7 +612,7 @@ class CollectProcessor(BaseProcessor):
                         parsed = self._extract_tool_usage(token)
                         if parsed:
                             tool_name, args = parsed
-                            if tool_name == "web_search":
+                            if tool_name.startswith("web_search"):
                                 query = self._normalize_search_text(args.get("query"), 200)
                                 if query:
                                     key = f"{rollout_id or tool_usage_card_id}|{query}"
@@ -578,6 +694,82 @@ class CollectProcessor(BaseProcessor):
                     is_thinking = current_is_thinking
 
                 if mr := resp.get("modelResponse"):
+                    if self.show_search:
+                        steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
+                        for step in steps:
+                            if not isinstance(step, dict):
+                                continue
+                            step_tags = step.get("tags") if isinstance(step.get("tags"), list) else []
+                            step_rollout = step.get("rolloutId") or ""
+                            step_tool_id = step.get("toolUsageCardId") or ""
+                            prefix = f"[{step_rollout}] " if step_rollout else ""
+
+                            text_parts = step.get("text") if isinstance(step.get("text"), list) else []
+                            for raw_text in text_parts:
+                                for tool_name, args in self._extract_tool_usage_cards(raw_text):
+                                    if not tool_name.startswith("web_search"):
+                                        continue
+                                    query = self._normalize_search_text(args.get("query"), 200)
+                                    if not query:
+                                        continue
+                                    key = f"{step_rollout or step_tool_id}|{query}"
+                                    if key in self._search_query_seen:
+                                        continue
+                                    self._search_query_seen.add(key)
+                                    msg = f"{prefix}🔍 搜索: {query}\n"
+                                    out = self._emit_search_text(msg, False)
+                                    if out:
+                                        content += out
+                                        saw_token = True
+
+                            results_list = self._extract_results_list(step.get("webSearchResults"))
+                            if results_list:
+                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                if key not in self._search_results_seen:
+                                    self._search_results_seen.add(key)
+                                    list_md = self._format_search_results(results_list)
+                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    if list_md:
+                                        msg += f"{list_md}\n"
+                                    out = self._emit_search_text(msg, False)
+                                    if out:
+                                        content += out
+                                        saw_token = True
+
+                            usage_results = step.get("toolUsageResults") if isinstance(step.get("toolUsageResults"), list) else []
+                            for usage in usage_results:
+                                if not isinstance(usage, dict) or not usage.get("webSearchResults"):
+                                    continue
+                                results_list = self._extract_results_list(usage.get("webSearchResults"))
+                                if not results_list:
+                                    continue
+                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                if key in self._search_results_seen:
+                                    continue
+                                self._search_results_seen.add(key)
+                                list_md = self._format_search_results(results_list)
+                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, False)
+                                if out:
+                                    content += out
+                                    saw_token = True
+
+                            if "raw_function_result" in step_tags and step.get("webSearchResults"):
+                                results_list = self._extract_results_list(step.get("webSearchResults"))
+                                if results_list:
+                                    key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                    if key not in self._search_results_seen:
+                                        self._search_results_seen.add(key)
+                                        list_md = self._format_search_results(results_list)
+                                        msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                        if list_md:
+                                            msg += f"{list_md}\n"
+                                        out = self._emit_search_text(msg, False)
+                                        if out:
+                                            content += out
+                                            saw_token = True
                     response_id = mr.get("responseId", "")
                     if not saw_token and isinstance(mr.get("message"), str):
                         content = mr.get("message", "")

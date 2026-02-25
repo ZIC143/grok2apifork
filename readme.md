@@ -174,7 +174,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml config
 ### 思考/搜索过程展示开关
 
 - `grok.thinking`：是否输出推理过程（`<think>...</think>`）。
-- `grok.show_search`：是否在推理过程中展示搜索查询与结果数量（仅在 `grok.thinking=true` 时生效）。
+- `grok.show_search`：是否展示搜索查询与结果数量（可与 `grok.thinking` 解耦）。
 
 
 ### 可用次数

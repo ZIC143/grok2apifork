@@ -4,7 +4,7 @@
 
 - 在 Workers 与 FastAPI 两端新增 `grok.show_search`（默认 `true`），把 Grok 的“搜索查询词 + 结果数量（+ 可选标题/链接列表）”解析并输出到 `<think>...</think>` 推理段。
 - 同时补齐 `stream=false`（非流式）聚合逻辑：两端都能返回包含 `<think>` 的完整内容，且用量统计能正确计算 `reasoning_tokens`。
-- 搜索过程 **仅在** `grok.thinking=true` 时展示（`grok.show_search` 作为附属开关）；两端行为、文案与边界条件对齐，且不污染最终回答。
+- 搜索过程由 `grok.show_search` 单独控制（可独立于 `grok.thinking`），两端行为、文案与边界条件对齐，且不污染最终回答。
 
 ### 外部行为/协议约定
 
@@ -60,7 +60,7 @@
 
 在 [src/grok/processor.ts](src/grok/processor.ts) 的 `createOpenAiStreamFromGrokNdjson()`：
 
-- 增加 `showSearch = settings.show_search !== false`（且仅当 `showThinking` 为真才生效）。
+- 增加 `showSearch = settings.show_search !== false`（不再依赖 `showThinking`）。
 - 把 `messageTag/toolUsageCardId/webSearchResults` 的处理前置到过滤逻辑之前。
 - 按“统一解析约束”输出 query/count/list，且 **强制写入 `<think>` 段内**。
 
@@ -76,7 +76,7 @@
 
 在 [app/services/grok/processor.py](app/services/grok/processor.py) 的 `StreamProcessor.process()`：
 
-- 新增 `self.show_search = bool(get_config("grok.show_search", True))`，并与 `self.show_think` 联动（`show_think` 关闭则视为 `show_search` 关闭）。
+- 新增 `self.show_search = bool(get_config("grok.show_search", True))`，不再与 `self.show_think` 联动。
 - 补齐对 `isThinking/messageTag/webSearchResults/rolloutId/toolUsageCardId` 的解析与输出，参考 [grok2api_new-main/app/services/grok_client.py](grok2api_new-main/app/services/grok_client.py) 的 `tool_usage_card/raw_function_result` 路径。
 - 调整过滤顺序：先处理 messageTag/webSearchResults，再对普通 token 应用 `filter_tags`。
 
@@ -101,7 +101,7 @@
 
 ### 8) 文档与一致性校验
 
-- 在 [readme.md](readme.md) 或 [README.cloudflare.md](README.cloudflare.md) 追加 `grok.show_search` 说明，并强调其依赖 `grok.thinking`。
+- 在 [readme.md](readme.md) 或 [README.cloudflare.md](README.cloudflare.md) 追加 `grok.show_search` 说明，并强调其可独立开关。
 - 两端默认值与配置页开关保持一致。
 
 ---
@@ -116,5 +116,5 @@
 ## Decisions
 
 - 使用 `<think>...</think>` 作为统一承载协议（避免引入自定义 SSE event，最大化兼容 OpenAI SSE 客户端）。
-- 搜索过程展示仅在 `grok.thinking=true` 时生效，`grok.show_search` 作为附属开关。
+- 搜索过程展示由 `grok.show_search` 决定，`grok.thinking` 不再是前置条件。
 - 流式与非流式都支持输出 `<think>` 内的推理/搜索信息，保证端到端一致。
