@@ -115,7 +115,7 @@ function normalizeGeneratedAssetUrls(input: unknown): string[] {
   return out;
 }
 
-const SEARCH_RESULT_LIMIT = 6;
+const SEARCH_RESULT_LIMIT = 0;
 const SEARCH_PREVIEW_LIMIT = 200;
 
 type SearchResult = { title: string; url: string; preview: string };
@@ -146,9 +146,9 @@ function buildMarkdownLink(result: SearchResult): string {
   const preview = previewRaw ? escapeMarkdownText(previewRaw.replace(/"/g, "'")) : "";
   if (url) {
     const suffix = preview ? ` \"${preview}\"` : "";
-    return `- [${title}](${url}${suffix})`;
+    return `[${title}](${url}${suffix})`;
   }
-  return title ? `- ${title}` : "";
+  return title ? `${title}` : "";
 }
 
 function extractSearchResults(raw: unknown): SearchResult[] {
@@ -171,9 +171,9 @@ function extractSearchResults(raw: unknown): SearchResult[] {
 
 function formatSearchResults(results: SearchResult[], limit = SEARCH_RESULT_LIMIT): string {
   if (!results.length) return "";
-  const capped = Math.max(1, Math.min(10, Math.floor(limit || SEARCH_RESULT_LIMIT)));
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), results.length) : results.length;
   const lines: string[] = [];
-  for (const result of results.slice(0, capped)) {
+  for (const result of results.slice(0, cap)) {
     const line = buildMarkdownLink(result);
     if (line) lines.push(line);
   }
@@ -286,9 +286,30 @@ export function createOpenAiStreamFromGrokNdjson(
       const seenSearchQueries = new Set<string>();
       const seenSearchResults = new Set<string>();
 
+      const pendingContent: string[] = [];
+
+      const flushPendingContent = () => {
+        if (!pendingContent.length) return;
+        const chunk = pendingContent.join("");
+        pendingContent.length = 0;
+        completionText += chunk;
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, chunk)));
+      };
+
+      const queueContent = (text: string) => {
+        if (!text) return;
+        if (showSearch) {
+          pendingContent.push(text);
+          return;
+        }
+        completionText += text;
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, text)));
+      };
+
       let buffer = "";
 
       const flushStop = () => {
+        flushPendingContent();
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, "", "stop")));
         controller.enqueue(encoder.encode(makeDone()));
       };
@@ -355,6 +376,7 @@ export function createOpenAiStreamFromGrokNdjson(
             const err = (data as any).error;
             if (err?.message) {
               finalStatus = 500;
+              flushPendingContent();
               controller.enqueue(
                 encoder.encode(makeChunk(id, created, currentModel, `Error: ${String(err.message)}`, "stop")),
               );
@@ -805,13 +827,13 @@ export function createOpenAiStreamFromGrokNdjson(
             }
 
             if (!shouldSkip) {
-              completionText += content;
-              controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
+              queueContent(content);
             }
             isThinking = currentIsThinking;
           }
         }
 
+        flushPendingContent();
         if (showThinking && thinkOpened) {
           const closeChunk = "\n</think>\n";
           completionText += closeChunk;
@@ -863,6 +885,7 @@ export function createOpenAiStreamFromGrokNdjson(
         controller.close();
       } catch (e) {
         finalStatus = 500;
+        flushPendingContent();
         controller.enqueue(
           encoder.encode(
             makeChunk(id, created, currentModel, `处理错误: ${e instanceof Error ? e.message : String(e)}`, "error"),
@@ -899,7 +922,8 @@ export async function parseOpenAiFromGrokNdjson(
   const text = await grokResp.text();
   const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  let content = "";
+  let searchText = "";
+  let responseText = "";
   let model = requestedModel;
   const filteredTags = (settings.filtered_tags ?? "")
     .split(",")
@@ -907,16 +931,21 @@ export async function parseOpenAiFromGrokNdjson(
     .filter(Boolean);
   const showThinking = settings.show_thinking !== false;
   const showSearch = settings.show_search !== false;
-  let sawToken = false;
+  let sawResponseToken = false;
   let isThinking = false;
   let thinkOpened = false;
   let thinkingFinished = false;
   const seenSearchQueries = new Set<string>();
   const seenSearchResults = new Set<string>();
 
-  const appendText = (textPart: string) => {
+  const appendSearchText = (textPart: string) => {
     if (!textPart) return;
-    content += textPart;
+    searchText += textPart;
+  };
+
+  const appendResponseText = (textPart: string) => {
+    if (!textPart) return;
+    responseText += textPart;
   };
 
   for (const line of lines) {
@@ -945,7 +974,7 @@ export async function parseOpenAiFromGrokNdjson(
         poster = toImgProxyUrl(global, origin, thumbPath);
       }
 
-      content = buildVideoHtml({
+      responseText = buildVideoHtml({
         videoUrl: src,
         posterPreview: settings.video_poster_preview === true,
         ...(poster ? { posterUrl: poster } : {}),
@@ -991,8 +1020,7 @@ export async function parseOpenAiFromGrokNdjson(
                   thinkOpened = false;
                 }
               }
-              appendText(msg);
-              sawToken = true;
+              appendSearchText(msg);
             }
           }
         }
@@ -1019,8 +1047,7 @@ export async function parseOpenAiFromGrokNdjson(
                 thinkOpened = false;
               }
             }
-            appendText(msg);
-            sawToken = true;
+            appendSearchText(msg);
           }
         }
         if (wasThinking && !currentIsThinking) thinkingFinished = true;
@@ -1046,8 +1073,7 @@ export async function parseOpenAiFromGrokNdjson(
                 thinkOpened = false;
               }
             }
-            appendText(msg);
-            sawToken = true;
+            appendSearchText(msg);
           }
         }
         if (wasThinking && !currentIsThinking) thinkingFinished = true;
@@ -1069,8 +1095,8 @@ export async function parseOpenAiFromGrokNdjson(
           if (wasThinking) thinkingFinished = true;
         }
         if (!shouldSkip) {
-          appendText(tokenContent);
-          sawToken = true;
+          appendResponseText(tokenContent);
+          sawResponseToken = true;
         }
         isThinking = currentIsThinking;
       }
@@ -1107,8 +1133,7 @@ export async function parseOpenAiFromGrokNdjson(
                 thinkOpened = false;
               }
             }
-            appendText(msg);
-            sawToken = true;
+            appendSearchText(msg);
           }
         }
 
@@ -1131,8 +1156,7 @@ export async function parseOpenAiFromGrokNdjson(
                   thinkOpened = false;
                 }
               }
-              appendText(msg);
-              sawToken = true;
+              appendSearchText(msg);
             }
           }
         }
@@ -1159,8 +1183,7 @@ export async function parseOpenAiFromGrokNdjson(
               thinkOpened = false;
             }
           }
-          appendText(msg);
-          sawToken = true;
+          appendSearchText(msg);
         }
 
         if (stepTags.includes("raw_function_result") && (step as any).webSearchResults) {
@@ -1182,8 +1205,7 @@ export async function parseOpenAiFromGrokNdjson(
                   thinkOpened = false;
                 }
               }
-              appendText(msg);
-              sawToken = true;
+              appendSearchText(msg);
             }
           }
         }
@@ -1209,8 +1231,7 @@ export async function parseOpenAiFromGrokNdjson(
               thinkOpened = false;
             }
           }
-          appendText(msg);
-          sawToken = true;
+          appendSearchText(msg);
         }
       }
     }
@@ -1237,8 +1258,7 @@ export async function parseOpenAiFromGrokNdjson(
             thinkOpened = false;
           }
         }
-        appendText(msg);
-        sawToken = true;
+        appendSearchText(msg);
       }
     }
     if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
@@ -1251,13 +1271,13 @@ export async function parseOpenAiFromGrokNdjson(
       for (const u of urls) {
         const imgPath = encodeAssetPath(u);
         const imgUrl = toImgProxyUrl(global, origin, imgPath);
-        appendText(`\n![Generated Image](${imgUrl})`);
+        appendResponseText(`\n![Generated Image](${imgUrl})`);
       }
       break;
     }
 
-    if (!sawToken && typeof modelResp.message === "string") {
-      content = modelResp.message;
+    if (!sawResponseToken && typeof modelResp.message === "string") {
+      responseText = modelResp.message;
     }
 
     // If upstream emits placeholder/empty generatedImageUrls in intermediate frames, keep scanning.
@@ -1268,7 +1288,7 @@ export async function parseOpenAiFromGrokNdjson(
   }
 
   if (showThinking && thinkOpened) {
-    appendText("\n</think>\n");
+    appendResponseText("\n</think>\n");
     thinkOpened = false;
   }
 
@@ -1276,7 +1296,7 @@ export async function parseOpenAiFromGrokNdjson(
   const usage = buildChatUsageFromTexts({
     promptTextTokens: promptEst.textTokens,
     promptImageTokens: promptEst.imageTokens,
-    completionText: content,
+    completionText: `${searchText}${responseText}`,
   });
 
   return {
@@ -1287,7 +1307,7 @@ export async function parseOpenAiFromGrokNdjson(
     choices: [
       {
         index: 0,
-        message: { role: "assistant", content },
+        message: { role: "assistant", content: `${searchText}${responseText}` },
         finish_reason: "stop",
       },
     ],

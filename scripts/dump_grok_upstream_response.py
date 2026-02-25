@@ -607,10 +607,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--message", default="what is the weather in new york now", help="发送的消息文本")
-    p.add_argument("--model-name", default="grok-420", help="上游 modelName，例如 grok-3 / grok-420")
+    p.add_argument("--model-name", default="grok-4-1-thinking-1129", help="上游 modelName，例如 grok-3 / grok-420")
     p.add_argument(
         "--model-mode",
-        default="MODEL_MODE_GROK_420",
+        default="MODEL_MODE_GROK_4_1_MINI_THINKING",
         help="上游 modelMode，例如 MODEL_MODE_GROK_3 / MODEL_MODE_GROK_420",
     )
 

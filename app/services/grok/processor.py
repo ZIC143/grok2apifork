@@ -125,9 +125,10 @@ class StreamProcessor(BaseProcessor):
         self._think_opened: bool = False
         self._search_query_seen: set[str] = set()
         self._search_results_seen: set[str] = set()
-        self._search_result_limit: int = 6
+        self._search_result_limit: int = 0
         self._search_preview_limit: int = 200
-        
+        self._pending_output: list[str] = []
+
         if think is None:
             self.show_think = get_config("grok.thinking", False)
         else:
@@ -156,9 +157,10 @@ class StreamProcessor(BaseProcessor):
     def _format_search_results(self, results: list[dict]) -> str:
         if not results:
             return ""
-        limit = max(1, min(10, int(self._search_result_limit or 6)))
+        limit = int(self._search_result_limit or 0)
+        cap = min(limit, len(results)) if limit > 0 else len(results)
         lines: list[str] = []
-        for item in results[:limit]:
+        for item in results[:cap]:
             title = self._normalize_search_text(item.get("title"), 200) or self._normalize_search_text(item.get("url"), 200)
             url = self._normalize_search_url(item.get("url"))
             preview = self._normalize_search_text(item.get("preview"), self._search_preview_limit)
@@ -166,9 +168,9 @@ class StreamProcessor(BaseProcessor):
                 title_safe = self._escape_markdown(title or "link")
                 preview_safe = self._escape_markdown(preview.replace('"', "'")) if preview else ""
                 suffix = f' "{preview_safe}"' if preview_safe else ""
-                lines.append(f"- [{title_safe}]({url}{suffix})")
+                lines.append(f"[{title_safe}]({url}{suffix})")
             elif title:
-                lines.append(f"- {self._escape_markdown(title)}")
+                lines.append(self._escape_markdown(title))
         return "\n".join(lines)
 
     def _extract_tool_usage(self, token_text: str) -> tuple[str, dict] | None:
@@ -223,6 +225,14 @@ class StreamProcessor(BaseProcessor):
             output = f"{output}</think>\n"
             self._think_opened = False
         return output
+
+    def _queue_or_emit(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        if self.show_search:
+            self._pending_output.append(text)
+            return None
+        return self._sse(text)
     
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """处理流式响应"""
@@ -254,8 +264,8 @@ class StreamProcessor(BaseProcessor):
                         if not self.think_opened:
                             yield self._sse("<think>\n")
                             self.think_opened = True
-                        idx = img.get('imageIndex', 0) + 1
-                        progress = img.get('progress', 0)
+                        idx = img.get("imageIndex", 0) + 1
+                        progress = img.get("progress", 0)
                         yield self._sse(f"正在生成第{idx}张图片中，当前进度{progress}%\n")
                         self._reasoning_text += f"正在生成第{idx}张图片中，当前进度{progress}%\n"
                     continue
@@ -293,12 +303,7 @@ class StreamProcessor(BaseProcessor):
                                         else:
                                             self._output_text += out
 
-                            step_results = step.get("webSearchResults")
-                            results_list = []
-                            if isinstance(step_results, dict) and isinstance(step_results.get("results"), list):
-                                results_list = step_results.get("results") or []
-                            elif isinstance(step_results, list):
-                                results_list = step_results
+                            results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
                                 key = f"{step_rollout or step_tool_id}|{len(results_list)}"
                                 if key not in self._search_results_seen:
@@ -355,6 +360,47 @@ class StreamProcessor(BaseProcessor):
                                                 self._reasoning_text += out
                                             else:
                                                 self._output_text += out
+
+                        results_list = self._extract_results_list(mr.get("webSearchResults"))
+                        if results_list:
+                            key = f"|{len(results_list)}"
+                            if key not in self._search_results_seen:
+                                self._search_results_seen.add(key)
+                                list_md = self._format_search_results(results_list)
+                                msg = f"📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, False)
+                                if out:
+                                    yield self._sse(out)
+                                    if self.show_think:
+                                        self._reasoning_text += out
+                                    else:
+                                        self._output_text += out
+
+                        tool_usage_results = mr.get("toolUsageResults") if isinstance(mr.get("toolUsageResults"), list) else []
+                        for usage in tool_usage_results:
+                            if not isinstance(usage, dict) or not usage.get("webSearchResults"):
+                                continue
+                            results_list = self._extract_results_list(usage.get("webSearchResults"))
+                            if not results_list:
+                                continue
+                            key = f"|{len(results_list)}"
+                            if key in self._search_results_seen:
+                                continue
+                            self._search_results_seen.add(key)
+                            list_md = self._format_search_results(results_list)
+                            msg = f"📄 找到 {len(results_list)} 条结果\n"
+                            if list_md:
+                                msg += f"{list_md}\n"
+                            out = self._emit_search_text(msg, False)
+                            if out:
+                                yield self._sse(out)
+                                if self.show_think:
+                                    self._reasoning_text += out
+                                else:
+                                    self._output_text += out
+
                     if self.think_opened and self.show_think:
                         if msg := mr.get("message"):
                             yield self._sse(msg + "\n")
@@ -371,15 +417,21 @@ class StreamProcessor(BaseProcessor):
                             dl_service = self._get_dl()
                             base64_data = await dl_service.to_base64(url, self.token, "image")
                             if base64_data:
-                                yield self._sse(f"![{img_id}]({base64_data})\n")
+                                queued = self._queue_or_emit(f"![{img_id}]({base64_data})\n")
+                                if queued:
+                                    yield queued
                                 self._output_text += f"![{img_id}]({base64_data})\n"
                             else:
                                 final_url = await self.process_url(url, "image")
-                                yield self._sse(f"![{img_id}]({final_url})\n")
+                                queued = self._queue_or_emit(f"![{img_id}]({final_url})\n")
+                                if queued:
+                                    yield queued
                                 self._output_text += f"![{img_id}]({final_url})\n"
                         else:
                             final_url = await self.process_url(url, "image")
-                            yield self._sse(f"![{img_id}]({final_url})\n")
+                            queued = self._queue_or_emit(f"![{img_id}]({final_url})\n")
+                            if queued:
+                                yield queued
                             self._output_text += f"![{img_id}]({final_url})\n"
                     
                     if (meta := mr.get("metadata", {})).get("llm_info", {}).get("modelHash"):
@@ -415,12 +467,7 @@ class StreamProcessor(BaseProcessor):
 
                         # 搜索过程：函数结果
                         if self.show_search and message_tag == "raw_function_result":
-                            web_results = resp.get("webSearchResults")
-                            results_list: list[dict] = []
-                            if isinstance(web_results, dict) and isinstance(web_results.get("results"), list):
-                                results_list = web_results.get("results") or []
-                            elif isinstance(web_results, list):
-                                results_list = web_results
+                            results_list = self._extract_results_list(resp.get("webSearchResults"))
                             if results_list:
                                 key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
                                 if key not in self._search_results_seen:
@@ -469,7 +516,9 @@ class StreamProcessor(BaseProcessor):
                             out_token = f"\n</think>\n{out_token}"
                             self._think_opened = False
 
-                        yield self._sse(out_token)
+                        queued = self._queue_or_emit(out_token)
+                        if queued:
+                            yield queued
                         if self._think_opened and self.show_think:
                             self._reasoning_text += out_token
                         else:
@@ -479,8 +528,13 @@ class StreamProcessor(BaseProcessor):
                 yield self._sse("</think>\n")
                 self.think_opened = False
             if self._think_opened:
-                yield self._sse("\n</think>\n")
+                queued = self._queue_or_emit("\n</think>\n")
+                if queued:
+                    yield queued
                 self._think_opened = False
+            if self._pending_output:
+                yield self._sse("".join(self._pending_output))
+                self._pending_output.clear()
             yield self._sse(finish="stop")
             yield "data: [DONE]\n\n"
         except Exception as e:
@@ -506,7 +560,7 @@ class CollectProcessor(BaseProcessor):
         self._think_opened = False
         self._search_query_seen: set[str] = set()
         self._search_results_seen: set[str] = set()
-        self._search_result_limit: int = 6
+        self._search_result_limit: int = 0
         self._search_preview_limit: int = 200
 
     def _normalize_search_text(self, value: Any, limit: int) -> str:
@@ -531,9 +585,10 @@ class CollectProcessor(BaseProcessor):
     def _format_search_results(self, results: list[dict]) -> str:
         if not results:
             return ""
-        limit = max(1, min(10, int(self._search_result_limit or 6)))
+        limit = int(self._search_result_limit or 0)
+        cap = min(limit, len(results)) if limit > 0 else len(results)
         lines: list[str] = []
-        for item in results[:limit]:
+        for item in results[:cap]:
             title = self._normalize_search_text(item.get("title"), 200) or self._normalize_search_text(item.get("url"), 200)
             url = self._normalize_search_url(item.get("url"))
             preview = self._normalize_search_text(item.get("preview"), self._search_preview_limit)
@@ -541,9 +596,9 @@ class CollectProcessor(BaseProcessor):
                 title_safe = self._escape_markdown(title or "link")
                 preview_safe = self._escape_markdown(preview.replace('"', "'")) if preview else ""
                 suffix = f' "{preview_safe}"' if preview_safe else ""
-                lines.append(f"- [{title_safe}]({url}{suffix})")
+                lines.append(f"[{title_safe}]({url}{suffix})")
             elif title:
-                lines.append(f"- {self._escape_markdown(title)}")
+                lines.append(self._escape_markdown(title))
         return "\n".join(lines)
 
     def _extract_tool_usage(self, token_text: str) -> tuple[str, dict] | None:
@@ -580,8 +635,9 @@ class CollectProcessor(BaseProcessor):
         """处理并收集完整响应"""
         response_id = ""
         fingerprint = ""
-        content = ""
-        saw_token = False
+        search_text = ""
+        response_text = ""
+        saw_response_token = False
         is_thinking = False
         thinking_finished = False
         
@@ -622,8 +678,7 @@ class CollectProcessor(BaseProcessor):
                                         msg = f"{prefix}🔍 搜索: {query}\n"
                                         out = self._emit_search_text(msg, current_is_thinking)
                                         if out:
-                                            content += out
-                                            saw_token = True
+                                            search_text += out
                         if is_thinking and not current_is_thinking:
                             thinking_finished = True
                         is_thinking = current_is_thinking
@@ -647,8 +702,7 @@ class CollectProcessor(BaseProcessor):
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, current_is_thinking)
                                 if out:
-                                    content += out
-                                    saw_token = True
+                                    search_text += out
                         if is_thinking and not current_is_thinking:
                             thinking_finished = True
                         is_thinking = current_is_thinking
@@ -667,8 +721,7 @@ class CollectProcessor(BaseProcessor):
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, current_is_thinking)
                                 if out:
-                                    content += out
-                                    saw_token = True
+                                    search_text += out
                         if is_thinking and not current_is_thinking:
                             thinking_finished = True
                         is_thinking = current_is_thinking
@@ -689,8 +742,8 @@ class CollectProcessor(BaseProcessor):
                         self._think_opened = False
                         if is_thinking:
                             thinking_finished = True
-                    content += out_token
-                    saw_token = True
+                    response_text += out_token
+                    saw_response_token = True
                     is_thinking = current_is_thinking
 
                 if mr := resp.get("modelResponse"):
@@ -719,8 +772,7 @@ class CollectProcessor(BaseProcessor):
                                     msg = f"{prefix}🔍 搜索: {query}\n"
                                     out = self._emit_search_text(msg, False)
                                     if out:
-                                        content += out
-                                        saw_token = True
+                                        search_text += out
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
@@ -733,8 +785,7 @@ class CollectProcessor(BaseProcessor):
                                         msg += f"{list_md}\n"
                                     out = self._emit_search_text(msg, False)
                                     if out:
-                                        content += out
-                                        saw_token = True
+                                        search_text += out
 
                             usage_results = step.get("toolUsageResults") if isinstance(step.get("toolUsageResults"), list) else []
                             for usage in usage_results:
@@ -753,8 +804,7 @@ class CollectProcessor(BaseProcessor):
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, False)
                                 if out:
-                                    content += out
-                                    saw_token = True
+                                    search_text += out
 
                             if "raw_function_result" in step_tags and step.get("webSearchResults"):
                                 results_list = self._extract_results_list(step.get("webSearchResults"))
@@ -768,14 +818,13 @@ class CollectProcessor(BaseProcessor):
                                             msg += f"{list_md}\n"
                                         out = self._emit_search_text(msg, False)
                                         if out:
-                                            content += out
-                                            saw_token = True
+                                            search_text += out
                     response_id = mr.get("responseId", "")
-                    if not saw_token and isinstance(mr.get("message"), str):
-                        content = mr.get("message", "")
+                    if not saw_response_token and isinstance(mr.get("message"), str):
+                        response_text = mr.get("message", "")
                     
                     if urls := mr.get("generatedImageUrls"):
-                        content += "\n"
+                        response_text += "\n"
                         for url in urls:
                             parts = url.split("/")
                             img_id = parts[-2] if len(parts) >= 2 else "image"
@@ -784,13 +833,13 @@ class CollectProcessor(BaseProcessor):
                                 dl_service = self._get_dl()
                                 base64_data = await dl_service.to_base64(url, self.token, "image")
                                 if base64_data:
-                                    content += f"![{img_id}]({base64_data})\n"
+                                    response_text += f"![{img_id}]({base64_data})\n"
                                 else:
                                     final_url = await self.process_url(url, "image")
-                                    content += f"![{img_id}]({final_url})\n"
+                                    response_text += f"![{img_id}]({final_url})\n"
                             else:
                                 final_url = await self.process_url(url, "image")
-                                content += f"![{img_id}]({final_url})\n"
+                                response_text += f"![{img_id}]({final_url})\n"
                     
                     if (meta := mr.get("metadata", {})).get("llm_info", {}).get("modelHash"):
                         fingerprint = meta["llm_info"]["modelHash"]
@@ -801,8 +850,9 @@ class CollectProcessor(BaseProcessor):
             await self.close()
         
         if self.show_think and self._think_opened:
-            content += "\n</think>\n"
+            response_text += "\n</think>\n"
             self._think_opened = False
+        content = f"{search_text}{response_text}"
         usage = build_chat_usage(prompt_messages or [], content)
         return {
             "id": response_id,
