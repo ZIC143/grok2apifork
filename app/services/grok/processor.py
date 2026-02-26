@@ -221,9 +221,6 @@ class StreamProcessor(BaseProcessor):
         if not self._think_opened:
             output = f"<think>\n{output}"
             self._think_opened = True
-        if not current_is_thinking:
-            output = f"{output}</think>\n"
-            self._think_opened = False
         return output
 
     def _queue_or_emit(self, text: str) -> Optional[str]:
@@ -626,9 +623,6 @@ class CollectProcessor(BaseProcessor):
         if not self._think_opened:
             output = f"<think>\n{output}"
             self._think_opened = True
-        if not current_is_thinking:
-            output = f"{output}</think>\n"
-            self._think_opened = False
         return output
     
     async def process(self, response: AsyncIterable[bytes], prompt_messages: Optional[list[dict]] = None) -> dict[str, Any]:

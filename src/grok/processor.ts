@@ -478,10 +478,6 @@ export function createOpenAiStreamFromGrokNdjson(
                           msg = `<think>\n${msg}`;
                           thinkOpened = true;
                         }
-                        if (!currentIsThinking) {
-                          msg = `${msg}</think>\n`;
-                          thinkOpened = false;
-                        }
                       }
                       completionText += msg;
                       controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
@@ -501,10 +497,6 @@ export function createOpenAiStreamFromGrokNdjson(
                           if (!thinkOpened) {
                             msg = `<think>\n${msg}`;
                             thinkOpened = true;
-                          }
-                          if (!currentIsThinking) {
-                            msg = `${msg}</think>\n`;
-                            thinkOpened = false;
                           }
                         }
                         completionText += msg;
@@ -530,10 +522,6 @@ export function createOpenAiStreamFromGrokNdjson(
                         msg = `<think>\n${msg}`;
                         thinkOpened = true;
                       }
-                      if (!currentIsThinking) {
-                        msg = `${msg}</think>\n`;
-                        thinkOpened = false;
-                      }
                     }
                     completionText += msg;
                     controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
@@ -552,10 +540,6 @@ export function createOpenAiStreamFromGrokNdjson(
                           if (!thinkOpened) {
                             msg = `<think>\n${msg}`;
                             thinkOpened = true;
-                          }
-                          if (!currentIsThinking) {
-                            msg = `${msg}</think>\n`;
-                            thinkOpened = false;
                           }
                         }
                         completionText += msg;
@@ -580,10 +564,6 @@ export function createOpenAiStreamFromGrokNdjson(
                         msg = `<think>\n${msg}`;
                         thinkOpened = true;
                       }
-                      if (!currentIsThinking) {
-                        msg = `${msg}</think>\n`;
-                        thinkOpened = false;
-                      }
                     }
                     completionText += msg;
                     controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
@@ -607,10 +587,6 @@ export function createOpenAiStreamFromGrokNdjson(
                     if (!thinkOpened) {
                       msg = `<think>\n${msg}`;
                       thinkOpened = true;
-                    }
-                    if (!currentIsThinking) {
-                      msg = `${msg}</think>\n`;
-                      thinkOpened = false;
                     }
                   }
                   completionText += msg;
@@ -632,10 +608,6 @@ export function createOpenAiStreamFromGrokNdjson(
                         msg = `<think>\n${msg}`;
                         thinkOpened = true;
                       }
-                      if (!currentIsThinking) {
-                        msg = `${msg}</think>\n`;
-                        thinkOpened = false;
-                      }
                     }
                     completionText += msg;
                     controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
@@ -659,10 +631,6 @@ export function createOpenAiStreamFromGrokNdjson(
                     if (!thinkOpened) {
                       msg = `<think>\n${msg}`;
                       thinkOpened = true;
-                    }
-                    if (!currentIsThinking) {
-                      msg = `${msg}</think>\n`;
-                      thinkOpened = false;
                     }
                   }
                   completionText += msg;
@@ -732,10 +700,6 @@ export function createOpenAiStreamFromGrokNdjson(
                         msg = `<think>\n${msg}`;
                         thinkOpened = true;
                       }
-                      if (!currentIsThinking) {
-                        msg = `${msg}</think>\n`;
-                        thinkOpened = false;
-                      }
                     }
                     completionText += msg;
                     controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
@@ -763,10 +727,6 @@ export function createOpenAiStreamFromGrokNdjson(
                       msg = `<think>\n${msg}`;
                       thinkOpened = true;
                     }
-                    if (!currentIsThinking) {
-                      msg = `${msg}</think>\n`;
-                      thinkOpened = false;
-                    }
                   }
                   completionText += msg;
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
@@ -792,10 +752,6 @@ export function createOpenAiStreamFromGrokNdjson(
                     if (!thinkOpened) {
                       msg = `<think>\n${msg}`;
                       thinkOpened = true;
-                    }
-                    if (!currentIsThinking) {
-                      msg = `${msg}</think>\n`;
-                      thinkOpened = false;
                     }
                   }
                   completionText += msg;
@@ -1015,10 +971,6 @@ export async function parseOpenAiFromGrokNdjson(
                   msg = `<think>\n${msg}`;
                   thinkOpened = true;
                 }
-                if (!currentIsThinking) {
-                  msg = `${msg}</think>\n`;
-                  thinkOpened = false;
-                }
               }
               appendSearchText(msg);
             }
@@ -1042,10 +994,6 @@ export async function parseOpenAiFromGrokNdjson(
                 msg = `<think>\n${msg}`;
                 thinkOpened = true;
               }
-              if (!currentIsThinking) {
-                msg = `${msg}</think>\n`;
-                thinkOpened = false;
-              }
             }
             appendSearchText(msg);
           }
@@ -1067,10 +1015,6 @@ export async function parseOpenAiFromGrokNdjson(
               if (!thinkOpened) {
                 msg = `<think>\n${msg}`;
                 thinkOpened = true;
-              }
-              if (!currentIsThinking) {
-                msg = `${msg}</think>\n`;
-                thinkOpened = false;
               }
             }
             appendSearchText(msg);
@@ -1128,10 +1072,6 @@ export async function parseOpenAiFromGrokNdjson(
                 msg = `<think>\n${msg}`;
                 thinkOpened = true;
               }
-              if (!currentIsThinking) {
-                msg = `${msg}</think>\n`;
-                thinkOpened = false;
-              }
             }
             appendSearchText(msg);
           }
@@ -1150,10 +1090,6 @@ export async function parseOpenAiFromGrokNdjson(
                 if (!thinkOpened) {
                   msg = `<think>\n${msg}`;
                   thinkOpened = true;
-                }
-                if (!currentIsThinking) {
-                  msg = `${msg}</think>\n`;
-                  thinkOpened = false;
                 }
               }
               appendSearchText(msg);
@@ -1178,10 +1114,6 @@ export async function parseOpenAiFromGrokNdjson(
               msg = `<think>\n${msg}`;
               thinkOpened = true;
             }
-            if (!currentIsThinking) {
-              msg = `${msg}</think>\n`;
-              thinkOpened = false;
-            }
           }
           appendSearchText(msg);
         }
@@ -1199,10 +1131,6 @@ export async function parseOpenAiFromGrokNdjson(
                 if (!thinkOpened) {
                   msg = `<think>\n${msg}`;
                   thinkOpened = true;
-                }
-                if (!currentIsThinking) {
-                  msg = `${msg}</think>\n`;
-                  thinkOpened = false;
                 }
               }
               appendSearchText(msg);
@@ -1226,10 +1154,6 @@ export async function parseOpenAiFromGrokNdjson(
               msg = `<think>\n${msg}`;
               thinkOpened = true;
             }
-            if (!currentIsThinking) {
-              msg = `${msg}</think>\n`;
-              thinkOpened = false;
-            }
           }
           appendSearchText(msg);
         }
@@ -1252,10 +1176,6 @@ export async function parseOpenAiFromGrokNdjson(
           if (!thinkOpened) {
             msg = `<think>\n${msg}`;
             thinkOpened = true;
-          }
-          if (!currentIsThinking) {
-            msg = `${msg}</think>\n`;
-            thinkOpened = false;
           }
         }
         appendSearchText(msg);
