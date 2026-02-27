@@ -180,9 +180,15 @@ function formatSearchResults(results: SearchResult[], limit = SEARCH_RESULT_LIMI
   return lines.join("\n");
 }
 
-function parseToolUsageCardToken(raw: string): { toolName: string; args: Record<string, unknown> } | null {
+function parseToolUsageCardToken(raw: string): {
+  toolName: string;
+  args: Record<string, unknown>;
+  toolUsageCardId?: string;
+} | null {
   const token = String(raw || "");
   if (!token) return null;
+  const idMatch = token.match(/<xai:tool_usage_card_id>([^<]+)<\/xai:tool_usage_card_id>/i);
+  const toolUsageCardId = idMatch?.[1] ?? "";
   const toolMatch = token.match(/<xai:tool_name>([^<]+)<\/xai:tool_name>/i);
   const toolName = toolMatch?.[1] ?? "";
   const argsMatch = token.match(/<!\[CDATA\[([\s\S]*?)\]\]>/);
@@ -195,8 +201,8 @@ function parseToolUsageCardToken(raw: string): { toolName: string; args: Record<
       // ignore parsing failures
     }
   }
-  if (!toolName && !Object.keys(args).length) return null;
-  return { toolName, args };
+  if (!toolName && !Object.keys(args).length && !toolUsageCardId) return null;
+  return { toolName, args, ...(toolUsageCardId ? { toolUsageCardId } : {}) };
 }
 
 function isWebSearchTool(name: string): boolean {
@@ -204,7 +210,9 @@ function isWebSearchTool(name: string): boolean {
   return tool.startsWith("web_search");
 }
 
-function extractToolUsageCardsFromText(raw: unknown): Array<{ toolName: string; args: Record<string, unknown> }> {
+function extractToolUsageCardsFromText(
+  raw: unknown,
+): Array<{ toolName: string; args: Record<string, unknown>; toolUsageCardId?: string }> {
   const text = String(raw ?? "");
   if (!text) return [];
   const matches = text.match(/<xai:tool_usage_card>[\s\S]*?<\/xai:tool_usage_card>/gi);
@@ -212,6 +220,7 @@ function extractToolUsageCardsFromText(raw: unknown): Array<{ toolName: string; 
     const parsed = matches.map((m) => parseToolUsageCardToken(m)).filter(Boolean) as Array<{
       toolName: string;
       args: Record<string, unknown>;
+      toolUsageCardId?: string;
     }>;
     return parsed;
   }
@@ -282,7 +291,6 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkingFinished = false;
       let thinkOpened = false;
       let thinkOpenedBySearch = false;
-      let answerStarted = false;
       let sawStreamSearchResults = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
@@ -502,12 +510,10 @@ export function createOpenAiStreamFromGrokNdjson(
             const currentIsThinking = Boolean(grok.isThinking);
             const wasThinking = isThinking;
             const messageTag = grok.messageTag;
-            const isSummaryTag = messageTag === "summary";
-            const effectiveIsThinking = answerStarted ? false : currentIsThinking || isSummaryTag;
             const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
             const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
 
-            if (showSearch && grok.modelResponse && !sawStreamSearchResults && !answerStarted) {
+            if (showSearch && grok.modelResponse && !sawStreamSearchResults) {
               const modelResp = grok.modelResponse;
               if (Array.isArray(modelResp.steps)) {
                 for (const step of modelResp.steps) {
@@ -526,10 +532,11 @@ export function createOpenAiStreamFromGrokNdjson(
                       if (!isWebSearchTool(card.toolName)) continue;
                       const query = normalizeSearchText((card.args as any)?.query, 200);
                       if (!query) continue;
-                      const dedupeKey = `${stepRolloutId || stepToolUsageId}|${query}`;
+                      const cardId = card.toolUsageCardId || stepToolUsageId || "";
+                      const dedupeKey = `${cardId || stepRolloutId || stepToolUsageId}|${query}`;
                       if (seenSearchQueries.has(dedupeKey)) continue;
                       seenSearchQueries.add(dedupeKey);
-                      queueSearchQuery(searchKey, prefix, query);
+                      queueSearchQuery(cardId || searchKey, prefix, query);
                     }
                   }
 
@@ -647,65 +654,56 @@ export function createOpenAiStreamFromGrokNdjson(
 
             // Text chat stream
             if (Array.isArray(rawToken)) {
-              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-              isThinking = effectiveIsThinking;
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
               continue;
             }
             if (typeof rawToken !== "string" || !rawToken) {
-              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-              isThinking = effectiveIsThinking;
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
               continue;
             }
             let token = rawToken;
 
-            if (thinkingFinished && effectiveIsThinking) {
-              isThinking = effectiveIsThinking;
+            if (thinkingFinished && currentIsThinking) {
+              isThinking = currentIsThinking;
               continue;
             }
 
 
             if (showSearch && messageTag === "tool_usage_card") {
-              if (answerStarted) {
-                if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-                isThinking = effectiveIsThinking;
-                continue;
-              }
               const parsed = parseToolUsageCardToken(token);
               if (parsed && isWebSearchTool(parsed.toolName)) {
                 const queryRaw = (parsed.args as any)?.query;
                 const query = normalizeSearchText(queryRaw, 200);
                 if (query) {
-                  const dedupeKey = `${rolloutId || toolUsageCardId}|${query}`;
+                  const cardId = parsed.toolUsageCardId || toolUsageCardId || "";
+                  const dedupeKey = `${cardId || rolloutId || toolUsageCardId}|${query}`;
                   if (!seenSearchQueries.has(dedupeKey)) {
                     seenSearchQueries.add(dedupeKey);
                     let prefix = "";
                     if (rolloutId) prefix = `[${rolloutId}] `;
-                    const searchKey = rolloutId || toolUsageCardId || "global";
+                    const searchKey = cardId || rolloutId || toolUsageCardId || "global";
                     queueSearchQuery(searchKey, prefix, query);
                   }
                 }
               }
-              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-              isThinking = effectiveIsThinking;
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
               continue;
             }
 
             if (showSearch && messageTag === "raw_function_result") {
-              if (answerStarted) {
-                if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-                isThinking = effectiveIsThinking;
-                continue;
-              }
               const results = extractSearchResults(grok.webSearchResults);
               if (results.length) {
-                const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+                const resultsKey = `${toolUsageCardId || rolloutId}|${results.length}`;
                 if (!seenSearchResults.has(resultsKey)) {
                   seenSearchResults.add(resultsKey);
                   sawStreamSearchResults = true;
                   let prefix = "";
                   if (rolloutId) prefix = `[${rolloutId}] `;
                   const list = formatSearchResults(results);
-                  const searchKey = rolloutId || toolUsageCardId || "global";
+                  const searchKey = toolUsageCardId || rolloutId || "global";
                   const pending = popSearchQuery(searchKey);
                   const headerPrefix = pending?.prefix ?? prefix;
                   const queryText = pending?.query ?? "";
@@ -724,27 +722,22 @@ export function createOpenAiStreamFromGrokNdjson(
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
               }
-              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-              isThinking = effectiveIsThinking;
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
               continue;
             }
 
             if (showSearch && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-              if (answerStarted) {
-                if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-                isThinking = effectiveIsThinking;
-                continue;
-              }
               const results = extractSearchResults(grok.webSearchResults);
               if (results.length) {
-                const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+                const resultsKey = `${toolUsageCardId || rolloutId}|${results.length}`;
                 if (!seenSearchResults.has(resultsKey)) {
                   seenSearchResults.add(resultsKey);
                   sawStreamSearchResults = true;
                   let prefix = "";
                   if (rolloutId) prefix = `[${rolloutId}] `;
                   const list = formatSearchResults(results);
-                  const searchKey = rolloutId || toolUsageCardId || "global";
+                  const searchKey = toolUsageCardId || rolloutId || "global";
                   const pending = popSearchQuery(searchKey);
                   const headerPrefix = pending?.prefix ?? prefix;
                   const queryText = pending?.query ?? "";
@@ -763,14 +756,8 @@ export function createOpenAiStreamFromGrokNdjson(
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
               }
-              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-              isThinking = effectiveIsThinking;
-              continue;
-            }
-
-            if (isSummaryTag && answerStarted) {
-              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
-              isThinking = effectiveIsThinking;
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
               continue;
             }
 
@@ -780,7 +767,7 @@ export function createOpenAiStreamFromGrokNdjson(
             if (messageTag === "header") content = `\n\n${token}\n\n`;
 
             let shouldSkip = false;
-            if (effectiveIsThinking) {
+            if (currentIsThinking) {
               if (!showThinking) {
                 shouldSkip = true;
               } else if (!thinkOpened) {
@@ -800,16 +787,15 @@ export function createOpenAiStreamFromGrokNdjson(
             }
 
             if (!shouldSkip) {
-              if (effectiveIsThinking) {
+              if (currentIsThinking) {
                 resetSearchPrefix();
                 completionText += content;
                 controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
               } else {
                 queueContent(content);
-                answerStarted = true;
               }
             }
-            isThinking = effectiveIsThinking;
+            isThinking = currentIsThinking;
           }
         }
 
@@ -1039,12 +1025,13 @@ export async function parseOpenAiFromGrokNdjson(
           const queryRaw = (parsed.args as any)?.query;
           const query = normalizeSearchText(queryRaw, 200);
           if (query) {
-            const dedupeKey = `${rolloutId || toolUsageCardId}|${query}`;
+            const cardId = parsed.toolUsageCardId || toolUsageCardId || "";
+            const dedupeKey = `${cardId || rolloutId || toolUsageCardId}|${query}`;
             if (!seenSearchQueries.has(dedupeKey)) {
               seenSearchQueries.add(dedupeKey);
               let prefix = "";
               if (rolloutId) prefix = `[${rolloutId}] `;
-              const searchKey = rolloutId || toolUsageCardId || "global";
+              const searchKey = cardId || rolloutId || toolUsageCardId || "global";
               queueSearchQuery(searchKey, prefix, query);
             }
           }
@@ -1054,13 +1041,13 @@ export async function parseOpenAiFromGrokNdjson(
       } else if (showSearch && messageTag === "raw_function_result") {
         const results = extractSearchResults(grok.webSearchResults);
         if (results.length) {
-          const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+          const resultsKey = `${toolUsageCardId || rolloutId}|${results.length}`;
           if (!seenSearchResults.has(resultsKey)) {
             seenSearchResults.add(resultsKey);
             let prefix = "";
             if (rolloutId) prefix = `[${rolloutId}] `;
             const list = formatSearchResults(results);
-            const searchKey = rolloutId || toolUsageCardId || "global";
+            const searchKey = toolUsageCardId || rolloutId || "global";
             const pending = popSearchQuery(searchKey);
             const headerPrefix = pending?.prefix ?? prefix;
             const queryText = pending?.query ?? "";
@@ -1083,13 +1070,13 @@ export async function parseOpenAiFromGrokNdjson(
       } else if (showSearch && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
         const results = extractSearchResults(grok.webSearchResults);
         if (results.length) {
-          const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
+          const resultsKey = `${toolUsageCardId || rolloutId}|${results.length}`;
           if (!seenSearchResults.has(resultsKey)) {
             seenSearchResults.add(resultsKey);
             let prefix = "";
             if (rolloutId) prefix = `[${rolloutId}] `;
             const list = formatSearchResults(results);
-            const searchKey = rolloutId || toolUsageCardId || "global";
+            const searchKey = toolUsageCardId || rolloutId || "global";
             const pending = popSearchQuery(searchKey);
             const headerPrefix = pending?.prefix ?? prefix;
             const queryText = pending?.query ?? "";
@@ -1156,10 +1143,11 @@ export async function parseOpenAiFromGrokNdjson(
             if (!isWebSearchTool(card.toolName)) continue;
             const query = normalizeSearchText((card.args as any)?.query, 200);
             if (!query) continue;
-            const dedupeKey = `${stepRolloutId || stepToolUsageId}|${query}`;
+            const cardId = card.toolUsageCardId || stepToolUsageId || "";
+            const dedupeKey = `${cardId || stepRolloutId || stepToolUsageId}|${query}`;
             if (seenSearchQueries.has(dedupeKey)) continue;
             seenSearchQueries.add(dedupeKey);
-            queueSearchQuery(searchKey, prefix, query);
+            queueSearchQuery(cardId || searchKey, prefix, query);
           }
         }
 

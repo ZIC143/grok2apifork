@@ -133,7 +133,6 @@ class StreamProcessor(BaseProcessor):
         self._last_search_was_query: bool = False
         self._think_opened_by_search: bool = False
         self._saw_stream_search: bool = False
-        self._answer_started: bool = False
 
         if think is None:
             self.show_think = get_config("grok.thinking", False)
@@ -215,9 +214,11 @@ class StreamProcessor(BaseProcessor):
                 lines.append(self._escape_markdown(title))
         return "\n".join(lines)
 
-    def _extract_tool_usage(self, token_text: str) -> tuple[str, dict] | None:
+    def _extract_tool_usage(self, token_text: str) -> tuple[str, dict, str] | None:
         if not token_text:
             return None
+        id_match = re.search(r"<xai:tool_usage_card_id>([^<]+)</xai:tool_usage_card_id>", token_text)
+        tool_usage_card_id = id_match.group(1) if id_match else ""
         tool_match = re.search(r"<xai:tool_name>([^<]+)</xai:tool_name>", token_text)
         tool_name = tool_match.group(1) if tool_match else ""
         args_match = re.search(r"<!\[CDATA\[([\s\S]*?)\]\]>", token_text)
@@ -227,17 +228,17 @@ class StreamProcessor(BaseProcessor):
                 args = orjson.loads(args_match.group(1)) or {}
             except Exception:
                 args = {}
-        if not tool_name and not args:
+        if not tool_name and not args and not tool_usage_card_id:
             return None
-        return tool_name, args
+        return tool_name, args, tool_usage_card_id
 
-    def _extract_tool_usage_cards(self, token_text: Any) -> list[tuple[str, dict]]:
+    def _extract_tool_usage_cards(self, token_text: Any) -> list[tuple[str, dict, str]]:
         text = str(token_text or "")
         if not text:
             return []
         matches = re.findall(r"<xai:tool_usage_card>[\s\S]*?<\/xai:tool_usage_card>", text, flags=re.IGNORECASE)
         if matches:
-            parsed: list[tuple[str, dict]] = []
+            parsed: list[tuple[str, dict, str]] = []
             for m in matches:
                 tool = self._extract_tool_usage(m)
                 if tool:
@@ -342,7 +343,7 @@ class StreamProcessor(BaseProcessor):
                 
                 # modelResponse
                 if mr := resp.get("modelResponse"):
-                    if self.show_search and not self._saw_stream_search and not self._answer_started:
+                    if self.show_search and not self._saw_stream_search:
                         steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
                         for step in steps:
                             if not isinstance(step, dict):
@@ -354,13 +355,13 @@ class StreamProcessor(BaseProcessor):
 
                             text_parts = step.get("text") if isinstance(step.get("text"), list) else []
                             for raw_text in text_parts:
-                                for tool_name, args in self._extract_tool_usage_cards(raw_text):
+                                for tool_name, args, card_id in self._extract_tool_usage_cards(raw_text):
                                     if not tool_name.startswith("web_search"):
                                         continue
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if not query:
                                         continue
-                                    key = step_rollout or step_tool_id or "global"
+                                    key = card_id or step_tool_id or step_rollout or "global"
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
@@ -490,22 +491,18 @@ class StreamProcessor(BaseProcessor):
                     if token and isinstance(token, str):
                         current_is_thinking = bool(resp.get("isThinking"))
                         message_tag = resp.get("messageTag")
-                        is_summary_tag = message_tag == "summary"
-                        effective_is_thinking = False if self._answer_started else (current_is_thinking or is_summary_tag)
                         rollout_id = resp.get("rolloutId") or ""
                         tool_usage_card_id = resp.get("toolUsageCardId") or ""
 
                         # 搜索过程：工具卡
                         if self.show_search and message_tag == "tool_usage_card":
-                            if self._answer_started:
-                                continue
                             parsed = self._extract_tool_usage(token)
                             if parsed:
-                                tool_name, args = parsed
+                                tool_name, args, card_id = parsed
                                 if tool_name.startswith("web_search"):
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if query:
-                                        key = rollout_id or tool_usage_card_id or "global"
+                                        key = card_id or tool_usage_card_id or rollout_id or "global"
                                         if key not in self._search_query_seen:
                                             self._search_query_seen.add(key)
                                             prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -514,11 +511,9 @@ class StreamProcessor(BaseProcessor):
 
                         # 搜索过程：函数结果
                         if self.show_search and message_tag == "raw_function_result":
-                            if self._answer_started:
-                                continue
                             results_list = self._extract_results_list(resp.get("webSearchResults"))
                             if results_list:
-                                key = rollout_id or tool_usage_card_id or "global"
+                                key = tool_usage_card_id or rollout_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     self._saw_stream_search = True
@@ -541,11 +536,9 @@ class StreamProcessor(BaseProcessor):
 
                         # 搜索过程：无 messageTag 但带结果
                         if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
-                            if self._answer_started:
-                                continue
                             results_list = resp.get("webSearchResults").get("results") or []
                             if results_list:
-                                key = rollout_id or tool_usage_card_id or "global"
+                                key = tool_usage_card_id or rollout_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     self._saw_stream_search = True
@@ -569,12 +562,9 @@ class StreamProcessor(BaseProcessor):
                         if self.filter_tags and any(t in token for t in self.filter_tags):
                             continue
 
-                        if is_summary_tag and self._answer_started:
-                            continue
-
                         # 推理包裹
                         out_token = token
-                        if effective_is_thinking:
+                        if current_is_thinking:
                             if self.show_think and not self._think_opened:
                                 out_token = f"<think>\n{out_token}"
                                 self._think_opened = True
@@ -598,7 +588,7 @@ class StreamProcessor(BaseProcessor):
                                     if immediate:
                                         yield immediate
 
-                        if effective_is_thinking:
+                        if current_is_thinking:
                             queued = self._queue_or_emit_immediate(out_token)
                         else:
                             queued = self._queue_or_emit(out_token)
@@ -608,8 +598,6 @@ class StreamProcessor(BaseProcessor):
                             self._reasoning_text += out_token
                         else:
                             self._output_text += out_token
-                        if not effective_is_thinking:
-                            self._answer_started = True
                         
             if self.think_opened:
                 yield self._sse("</think>\n")
@@ -792,11 +780,11 @@ class CollectProcessor(BaseProcessor):
                     if self.show_search and message_tag == "tool_usage_card":
                         parsed = self._extract_tool_usage(token)
                         if parsed:
-                            tool_name, args = parsed
+                            tool_name, args, card_id = parsed
                             if tool_name.startswith("web_search"):
                                 query = self._normalize_search_text(args.get("query"), 200)
                                 if query:
-                                    key = f"{rollout_id or tool_usage_card_id}|{query}"
+                                    key = f"{card_id or tool_usage_card_id or rollout_id}|{query}"
                                     if key not in self._search_query_seen:
                                         self._search_query_seen.add(key)
                                         prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -814,7 +802,7 @@ class CollectProcessor(BaseProcessor):
                         elif isinstance(web_results, list):
                             results_list = web_results
                         if results_list:
-                            key = rollout_id or tool_usage_card_id or "global"
+                            key = tool_usage_card_id or rollout_id or "global"
                             if key not in self._search_results_seen:
                                 self._search_results_seen.add(key)
                                 prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -839,7 +827,7 @@ class CollectProcessor(BaseProcessor):
                     if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
                         results_list = resp.get("webSearchResults").get("results") or []
                         if results_list:
-                            key = rollout_id or tool_usage_card_id or "global"
+                            key = tool_usage_card_id or rollout_id or "global"
                             if key not in self._search_results_seen:
                                 self._search_results_seen.add(key)
                                 prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -903,13 +891,13 @@ class CollectProcessor(BaseProcessor):
 
                             text_parts = step.get("text") if isinstance(step.get("text"), list) else []
                             for raw_text in text_parts:
-                                for tool_name, args in self._extract_tool_usage_cards(raw_text):
+                                for tool_name, args, card_id in self._extract_tool_usage_cards(raw_text):
                                     if not tool_name.startswith("web_search"):
                                         continue
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if not query:
                                         continue
-                                    key = step_rollout or step_tool_id or "global"
+                                    key = card_id or step_tool_id or step_rollout or "global"
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
@@ -917,7 +905,7 @@ class CollectProcessor(BaseProcessor):
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
-                                key = step_rollout or step_tool_id or "global"
+                                key = step_tool_id or step_rollout or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     list_md = self._format_search_results(results_list)
@@ -941,7 +929,7 @@ class CollectProcessor(BaseProcessor):
                                 results_list = self._extract_results_list(usage.get("webSearchResults"))
                                 if not results_list:
                                     continue
-                                key = step_rollout or step_tool_id or "global"
+                                key = step_tool_id or step_rollout or "global"
                                 if key in self._search_results_seen:
                                     continue
                                 self._search_results_seen.add(key)
@@ -962,7 +950,7 @@ class CollectProcessor(BaseProcessor):
                             if "raw_function_result" in step_tags and step.get("webSearchResults"):
                                 results_list = self._extract_results_list(step.get("webSearchResults"))
                                 if results_list:
-                                    key = step_rollout or step_tool_id or "global"
+                                    key = step_tool_id or step_rollout or "global"
                                     if key not in self._search_results_seen:
                                         self._search_results_seen.add(key)
                                         list_md = self._format_search_results(results_list)
