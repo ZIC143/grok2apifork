@@ -282,6 +282,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkingFinished = false;
       let thinkOpened = false;
       let thinkOpenedBySearch = false;
+      let answerStarted = false;
       let sawStreamSearchResults = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
@@ -501,10 +502,12 @@ export function createOpenAiStreamFromGrokNdjson(
             const currentIsThinking = Boolean(grok.isThinking);
             const wasThinking = isThinking;
             const messageTag = grok.messageTag;
+            const isSummaryTag = messageTag === "summary";
+            const effectiveIsThinking = answerStarted ? false : currentIsThinking || isSummaryTag;
             const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
             const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
 
-            if (showSearch && grok.modelResponse && !sawStreamSearchResults) {
+            if (showSearch && grok.modelResponse && !sawStreamSearchResults && !answerStarted) {
               const modelResp = grok.modelResponse;
               if (Array.isArray(modelResp.steps)) {
                 for (const step of modelResp.steps) {
@@ -644,24 +647,29 @@ export function createOpenAiStreamFromGrokNdjson(
 
             // Text chat stream
             if (Array.isArray(rawToken)) {
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
+              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+              isThinking = effectiveIsThinking;
               continue;
             }
             if (typeof rawToken !== "string" || !rawToken) {
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
+              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+              isThinking = effectiveIsThinking;
               continue;
             }
             let token = rawToken;
 
-            if (thinkingFinished && currentIsThinking) {
-              isThinking = currentIsThinking;
+            if (thinkingFinished && effectiveIsThinking) {
+              isThinking = effectiveIsThinking;
               continue;
             }
 
 
             if (showSearch && messageTag === "tool_usage_card") {
+              if (answerStarted) {
+                if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+                isThinking = effectiveIsThinking;
+                continue;
+              }
               const parsed = parseToolUsageCardToken(token);
               if (parsed && isWebSearchTool(parsed.toolName)) {
                 const queryRaw = (parsed.args as any)?.query;
@@ -677,12 +685,17 @@ export function createOpenAiStreamFromGrokNdjson(
                   }
                 }
               }
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
+              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+              isThinking = effectiveIsThinking;
               continue;
             }
 
             if (showSearch && messageTag === "raw_function_result") {
+              if (answerStarted) {
+                if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+                isThinking = effectiveIsThinking;
+                continue;
+              }
               const results = extractSearchResults(grok.webSearchResults);
               if (results.length) {
                 const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
@@ -711,12 +724,17 @@ export function createOpenAiStreamFromGrokNdjson(
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
               }
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
+              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+              isThinking = effectiveIsThinking;
               continue;
             }
 
             if (showSearch && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
+              if (answerStarted) {
+                if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+                isThinking = effectiveIsThinking;
+                continue;
+              }
               const results = extractSearchResults(grok.webSearchResults);
               if (results.length) {
                 const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
@@ -745,8 +763,14 @@ export function createOpenAiStreamFromGrokNdjson(
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
               }
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
+              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+              isThinking = effectiveIsThinking;
+              continue;
+            }
+
+            if (isSummaryTag && answerStarted) {
+              if (wasThinking && !effectiveIsThinking) thinkingFinished = true;
+              isThinking = effectiveIsThinking;
               continue;
             }
 
@@ -756,7 +780,7 @@ export function createOpenAiStreamFromGrokNdjson(
             if (messageTag === "header") content = `\n\n${token}\n\n`;
 
             let shouldSkip = false;
-            if (currentIsThinking) {
+            if (effectiveIsThinking) {
               if (!showThinking) {
                 shouldSkip = true;
               } else if (!thinkOpened) {
@@ -776,15 +800,16 @@ export function createOpenAiStreamFromGrokNdjson(
             }
 
             if (!shouldSkip) {
-              if (currentIsThinking) {
+              if (effectiveIsThinking) {
                 resetSearchPrefix();
                 completionText += content;
                 controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
               } else {
                 queueContent(content);
+                answerStarted = true;
               }
             }
-            isThinking = currentIsThinking;
+            isThinking = effectiveIsThinking;
           }
         }
 

@@ -133,6 +133,7 @@ class StreamProcessor(BaseProcessor):
         self._last_search_was_query: bool = False
         self._think_opened_by_search: bool = False
         self._saw_stream_search: bool = False
+        self._answer_started: bool = False
 
         if think is None:
             self.show_think = get_config("grok.thinking", False)
@@ -341,7 +342,7 @@ class StreamProcessor(BaseProcessor):
                 
                 # modelResponse
                 if mr := resp.get("modelResponse"):
-                    if self.show_search and not self._saw_stream_search:
+                    if self.show_search and not self._saw_stream_search and not self._answer_started:
                         steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
                         for step in steps:
                             if not isinstance(step, dict):
@@ -489,11 +490,15 @@ class StreamProcessor(BaseProcessor):
                     if token and isinstance(token, str):
                         current_is_thinking = bool(resp.get("isThinking"))
                         message_tag = resp.get("messageTag")
+                        is_summary_tag = message_tag == "summary"
+                        effective_is_thinking = False if self._answer_started else (current_is_thinking or is_summary_tag)
                         rollout_id = resp.get("rolloutId") or ""
                         tool_usage_card_id = resp.get("toolUsageCardId") or ""
 
                         # 搜索过程：工具卡
                         if self.show_search and message_tag == "tool_usage_card":
+                            if self._answer_started:
+                                continue
                             parsed = self._extract_tool_usage(token)
                             if parsed:
                                 tool_name, args = parsed
@@ -509,6 +514,8 @@ class StreamProcessor(BaseProcessor):
 
                         # 搜索过程：函数结果
                         if self.show_search and message_tag == "raw_function_result":
+                            if self._answer_started:
+                                continue
                             results_list = self._extract_results_list(resp.get("webSearchResults"))
                             if results_list:
                                 key = rollout_id or tool_usage_card_id or "global"
@@ -534,6 +541,8 @@ class StreamProcessor(BaseProcessor):
 
                         # 搜索过程：无 messageTag 但带结果
                         if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
+                            if self._answer_started:
+                                continue
                             results_list = resp.get("webSearchResults").get("results") or []
                             if results_list:
                                 key = rollout_id or tool_usage_card_id or "global"
@@ -560,9 +569,12 @@ class StreamProcessor(BaseProcessor):
                         if self.filter_tags and any(t in token for t in self.filter_tags):
                             continue
 
+                        if is_summary_tag and self._answer_started:
+                            continue
+
                         # 推理包裹
                         out_token = token
-                        if current_is_thinking:
+                        if effective_is_thinking:
                             if self.show_think and not self._think_opened:
                                 out_token = f"<think>\n{out_token}"
                                 self._think_opened = True
@@ -586,7 +598,7 @@ class StreamProcessor(BaseProcessor):
                                     if immediate:
                                         yield immediate
 
-                        if current_is_thinking:
+                        if effective_is_thinking:
                             queued = self._queue_or_emit_immediate(out_token)
                         else:
                             queued = self._queue_or_emit(out_token)
@@ -596,6 +608,8 @@ class StreamProcessor(BaseProcessor):
                             self._reasoning_text += out_token
                         else:
                             self._output_text += out_token
+                        if not effective_is_thinking:
+                            self._answer_started = True
                         
             if self.think_opened:
                 yield self._sse("</think>\n")
