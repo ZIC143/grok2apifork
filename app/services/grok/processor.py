@@ -279,6 +279,11 @@ class StreamProcessor(BaseProcessor):
             return None
         return self._sse(text)
 
+    def _queue_or_emit_immediate(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        return self._sse(text)
+
     def _append_response_text_safely(self, response_text: str, text: str) -> str:
         if not text:
             return response_text
@@ -554,9 +559,12 @@ class StreamProcessor(BaseProcessor):
                             out_token = f"\n</think>\n{out_token}"
                             self._think_opened = False
 
-                        if self.show_search and self._think_opened and not current_is_thinking:
-                            out_token = f"\n</think>\n{out_token}"
-                            self._think_opened = False
+                        if self.show_search and self._think_opened and self._think_opened_by_search:
+                            close_chunk = self._close_search_think_into()
+                            if close_chunk:
+                                immediate = self._queue_or_emit_immediate(close_chunk)
+                                if immediate:
+                                    yield immediate
 
                         queued = self._queue_or_emit(out_token)
                         if queued:

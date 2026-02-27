@@ -349,6 +349,15 @@ export function createOpenAiStreamFromGrokNdjson(
         controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, text)));
       };
 
+      const closeSearchThink = () => {
+        if (!showThinking || !thinkOpened || !thinkOpenedBySearch) return;
+        const closeChunk = "\n</think>\n";
+        thinkOpened = false;
+        thinkOpenedBySearch = false;
+        completionText += closeChunk;
+        controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, closeChunk)));
+      };
+
       let buffer = "";
 
       const flushStop = () => {
@@ -739,6 +748,8 @@ export function createOpenAiStreamFromGrokNdjson(
             }
 
             if (filteredTags.some((t) => token.includes(t))) continue;
+
+            if (showSearch && thinkOpenedBySearch) closeSearchThink();
 
             let content = token;
             if (messageTag === "header") content = `\n\n${token}\n\n`;
