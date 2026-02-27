@@ -128,6 +128,9 @@ class StreamProcessor(BaseProcessor):
         self._search_result_limit: int = 0
         self._search_preview_limit: int = 200
         self._pending_output: list[str] = []
+        self._pending_search_queries: dict[str, list[dict[str, str]]] = {}
+        self._last_search_prefix: str = ""
+        self._last_search_was_query: bool = False
 
         if think is None:
             self.show_think = get_config("grok.thinking", False)
@@ -153,6 +156,71 @@ class StreamProcessor(BaseProcessor):
         if not (url.startswith("http://") or url.startswith("https://") or url.startswith("/")):
             return ""
         return url.replace(" ", "%20").replace(")", "%29")
+
+    def _build_search_header(self, prefix: str, is_query: bool) -> str:
+        if not prefix:
+            self._last_search_prefix = ""
+            self._last_search_was_query = is_query
+            return ""
+        if is_query:
+            self._last_search_prefix = prefix
+            self._last_search_was_query = True
+            return f"{prefix}\n"
+        header = ""
+        if (not self._last_search_was_query) or (self._last_search_prefix != prefix):
+            header = f"{prefix}\n"
+        self._last_search_prefix = prefix
+        self._last_search_was_query = False
+        return header
+
+    def _queue_search_query(self, key: str, prefix: str, query: str) -> None:
+        if not key or not query:
+            return
+        bucket = self._pending_search_queries.setdefault(key, [])
+        bucket.append({
+            "prefix": prefix,
+            "query": query,
+        })
+
+    def _pop_search_query(self, key: str) -> Optional[dict[str, str]]:
+        if not key:
+            return None
+        bucket = self._pending_search_queries.get(key)
+        if not bucket:
+            return None
+        item = bucket.pop(0)
+        if not bucket:
+            self._pending_search_queries.pop(key, None)
+        return item
+
+    def _build_search_header(self, prefix: str, is_query: bool) -> str:
+        if not prefix:
+            self._last_search_prefix = ""
+            self._last_search_was_query = is_query
+            return ""
+        if is_query:
+            self._last_search_prefix = prefix
+            self._last_search_was_query = True
+            return f"{prefix}\n"
+        header = ""
+        if (not self._last_search_was_query) or (self._last_search_prefix != prefix):
+            header = f"{prefix}\n"
+        self._last_search_prefix = prefix
+        self._last_search_was_query = False
+        return header
+
+    def _queue_search_query(self, key: str, prefix: str, query: str) -> None:
+        if not key or not query:
+            return
+        self._pending_search_queries[key] = {
+            "prefix": prefix,
+            "query": query,
+        }
+
+    def _pop_search_query(self, key: str) -> Optional[dict[str, str]]:
+        if not key:
+            return None
+        return self._pending_search_queries.pop(key, None)
 
     def _format_search_results(self, results: list[dict]) -> str:
         if not results:
@@ -291,14 +359,7 @@ class StreamProcessor(BaseProcessor):
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
-                                    msg = f"{prefix}🔍 搜索: {query}\n"
-                                    out = self._emit_search_text(msg, False)
-                                    if out:
-                                        yield self._sse(out)
-                                        if self.show_think:
-                                            self._reasoning_text += out
-                                        else:
-                                            self._output_text += out
+                                    self._queue_search_query(key, prefix, query)
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
@@ -306,7 +367,13 @@ class StreamProcessor(BaseProcessor):
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     list_md = self._format_search_results(results_list)
-                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    pending = self._pop_search_query(key)
+                                    header_prefix = pending.get("prefix") if pending else prefix
+                                    query_text = pending.get("query") if pending else ""
+                                    msg = ""
+                                    if query_text:
+                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                     if list_md:
                                         msg += f"{list_md}\n"
                                     out = self._emit_search_text(msg, False)
@@ -329,7 +396,13 @@ class StreamProcessor(BaseProcessor):
                                     continue
                                 self._search_results_seen.add(key)
                                 list_md = self._format_search_results(results_list)
-                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                pending = self._pop_search_query(key)
+                                header_prefix = pending.get("prefix") if pending else prefix
+                                query_text = pending.get("query") if pending else ""
+                                msg = ""
+                                if query_text:
+                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                 if list_md:
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, False)
@@ -347,7 +420,13 @@ class StreamProcessor(BaseProcessor):
                                     if key not in self._search_results_seen:
                                         self._search_results_seen.add(key)
                                         list_md = self._format_search_results(results_list)
-                                        msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                        pending = self._pop_search_query(key)
+                                        header_prefix = pending.get("prefix") if pending else prefix
+                                        query_text = pending.get("query") if pending else ""
+                                        msg = ""
+                                        if query_text:
+                                            msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                        msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                         if list_md:
                                             msg += f"{list_md}\n"
                                         out = self._emit_search_text(msg, False)
@@ -358,45 +437,7 @@ class StreamProcessor(BaseProcessor):
                                             else:
                                                 self._output_text += out
 
-                        results_list = self._extract_results_list(mr.get("webSearchResults"))
-                        if results_list:
-                            key = f"|{len(results_list)}"
-                            if key not in self._search_results_seen:
-                                self._search_results_seen.add(key)
-                                list_md = self._format_search_results(results_list)
-                                msg = f"📄 找到 {len(results_list)} 条结果\n"
-                                if list_md:
-                                    msg += f"{list_md}\n"
-                                out = self._emit_search_text(msg, False)
-                                if out:
-                                    yield self._sse(out)
-                                    if self.show_think:
-                                        self._reasoning_text += out
-                                    else:
-                                        self._output_text += out
-
-                        tool_usage_results = mr.get("toolUsageResults") if isinstance(mr.get("toolUsageResults"), list) else []
-                        for usage in tool_usage_results:
-                            if not isinstance(usage, dict) or not usage.get("webSearchResults"):
-                                continue
-                            results_list = self._extract_results_list(usage.get("webSearchResults"))
-                            if not results_list:
-                                continue
-                            key = f"|{len(results_list)}"
-                            if key in self._search_results_seen:
-                                continue
-                            self._search_results_seen.add(key)
-                            list_md = self._format_search_results(results_list)
-                            msg = f"📄 找到 {len(results_list)} 条结果\n"
-                            if list_md:
-                                msg += f"{list_md}\n"
-                            out = self._emit_search_text(msg, False)
-                            if out:
-                                yield self._sse(out)
-                                if self.show_think:
-                                    self._reasoning_text += out
-                                else:
-                                    self._output_text += out
+                        # Skip aggregated model-level webSearchResults/toolUsageResults to avoid duplicate summaries.
 
                     if self.think_opened and self.show_think:
                         if msg := mr.get("message"):
@@ -455,11 +496,7 @@ class StreamProcessor(BaseProcessor):
                                         if key not in self._search_query_seen:
                                             self._search_query_seen.add(key)
                                             prefix = f"[{rollout_id}] " if rollout_id else ""
-                                            msg = f"{prefix}🔍 搜索: {query}\n"
-                                            out = self._emit_search_text(msg, current_is_thinking)
-                                            if out:
-                                                yield self._sse(out)
-                                                self._reasoning_text += out
+                                            self._queue_search_query(key, prefix, query)
                             continue
 
                         # 搜索过程：函数结果
@@ -471,7 +508,13 @@ class StreamProcessor(BaseProcessor):
                                     self._search_results_seen.add(key)
                                     prefix = f"[{rollout_id}] " if rollout_id else ""
                                     list_md = self._format_search_results(results_list)
-                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    pending = self._pop_search_query(key)
+                                    header_prefix = pending.get("prefix") if pending else prefix
+                                    query_text = pending.get("query") if pending else ""
+                                    msg = ""
+                                    if query_text:
+                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                     if list_md:
                                         msg += f"{list_md}\n"
                                     out = self._emit_search_text(msg, current_is_thinking)
@@ -489,7 +532,13 @@ class StreamProcessor(BaseProcessor):
                                     self._search_results_seen.add(key)
                                     prefix = f"[{rollout_id}] " if rollout_id else ""
                                     list_md = self._format_search_results(results_list)
-                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    pending = self._pop_search_query(key)
+                                    header_prefix = pending.get("prefix") if pending else prefix
+                                    query_text = pending.get("query") if pending else ""
+                                    msg = ""
+                                    if query_text:
+                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                     if list_md:
                                         msg += f"{list_md}\n"
                                     out = self._emit_search_text(msg, current_is_thinking)
@@ -510,6 +559,10 @@ class StreamProcessor(BaseProcessor):
                             elif not self.show_think:
                                 continue
                         elif self._think_opened and self.show_think:
+                            out_token = f"\n</think>\n{out_token}"
+                            self._think_opened = False
+
+                        if self.show_search and self._think_opened and not current_is_thinking:
                             out_token = f"\n</think>\n{out_token}"
                             self._think_opened = False
 
@@ -559,6 +612,9 @@ class CollectProcessor(BaseProcessor):
         self._search_results_seen: set[str] = set()
         self._search_result_limit: int = 0
         self._search_preview_limit: int = 200
+        self._pending_search_queries: dict[str, list[dict[str, str]]] = {}
+        self._last_search_prefix: str = ""
+        self._last_search_was_query: bool = False
 
     def _normalize_search_text(self, value: Any, limit: int) -> str:
         text = " ".join(str(value or "").split()).strip()
@@ -669,10 +725,7 @@ class CollectProcessor(BaseProcessor):
                                     if key not in self._search_query_seen:
                                         self._search_query_seen.add(key)
                                         prefix = f"[{rollout_id}] " if rollout_id else ""
-                                        msg = f"{prefix}🔍 搜索: {query}\n"
-                                        out = self._emit_search_text(msg, current_is_thinking)
-                                        if out:
-                                            search_text += out
+                                        self._queue_search_query(key, prefix, query)
                         if is_thinking and not current_is_thinking:
                             thinking_finished = True
                         is_thinking = current_is_thinking
@@ -691,7 +744,13 @@ class CollectProcessor(BaseProcessor):
                                 self._search_results_seen.add(key)
                                 prefix = f"[{rollout_id}] " if rollout_id else ""
                                 list_md = self._format_search_results(results_list)
-                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                pending = self._pop_search_query(key)
+                                header_prefix = pending.get("prefix") if pending else prefix
+                                query_text = pending.get("query") if pending else ""
+                                msg = ""
+                                if query_text:
+                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                 if list_md:
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, current_is_thinking)
@@ -710,7 +769,13 @@ class CollectProcessor(BaseProcessor):
                                 self._search_results_seen.add(key)
                                 prefix = f"[{rollout_id}] " if rollout_id else ""
                                 list_md = self._format_search_results(results_list)
-                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                pending = self._pop_search_query(key)
+                                header_prefix = pending.get("prefix") if pending else prefix
+                                query_text = pending.get("query") if pending else ""
+                                msg = ""
+                                if query_text:
+                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                 if list_md:
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, current_is_thinking)
@@ -736,6 +801,9 @@ class CollectProcessor(BaseProcessor):
                         self._think_opened = False
                         if is_thinking:
                             thinking_finished = True
+                    if self.show_search and self._think_opened and not current_is_thinking:
+                        out_token = f"\n</think>\n{out_token}"
+                        self._think_opened = False
                     response_text += out_token
                     saw_response_token = True
                     is_thinking = current_is_thinking
@@ -763,10 +831,7 @@ class CollectProcessor(BaseProcessor):
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
-                                    msg = f"{prefix}🔍 搜索: {query}\n"
-                                    out = self._emit_search_text(msg, False)
-                                    if out:
-                                        search_text += out
+                                    self._queue_search_query(key, prefix, query)
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
@@ -774,7 +839,13 @@ class CollectProcessor(BaseProcessor):
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     list_md = self._format_search_results(results_list)
-                                    msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                    pending = self._pop_search_query(key)
+                                    header_prefix = pending.get("prefix") if pending else prefix
+                                    query_text = pending.get("query") if pending else ""
+                                    msg = ""
+                                    if query_text:
+                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                     if list_md:
                                         msg += f"{list_md}\n"
                                     out = self._emit_search_text(msg, False)
@@ -793,7 +864,13 @@ class CollectProcessor(BaseProcessor):
                                     continue
                                 self._search_results_seen.add(key)
                                 list_md = self._format_search_results(results_list)
-                                msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                pending = self._pop_search_query(key)
+                                header_prefix = pending.get("prefix") if pending else prefix
+                                query_text = pending.get("query") if pending else ""
+                                msg = ""
+                                if query_text:
+                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                 if list_md:
                                     msg += f"{list_md}\n"
                                 out = self._emit_search_text(msg, False)
@@ -807,7 +884,13 @@ class CollectProcessor(BaseProcessor):
                                     if key not in self._search_results_seen:
                                         self._search_results_seen.add(key)
                                         list_md = self._format_search_results(results_list)
-                                        msg = f"{prefix}📄 找到 {len(results_list)} 条结果\n"
+                                        pending = self._pop_search_query(key)
+                                        header_prefix = pending.get("prefix") if pending else prefix
+                                        query_text = pending.get("query") if pending else ""
+                                        msg = ""
+                                        if query_text:
+                                            msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                        msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
                                         if list_md:
                                             msg += f"{list_md}\n"
                                         out = self._emit_search_text(msg, False)

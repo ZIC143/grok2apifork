@@ -285,8 +285,49 @@ export function createOpenAiStreamFromGrokNdjson(
       let lastVideoProgress = -1;
       const seenSearchQueries = new Set<string>();
       const seenSearchResults = new Set<string>();
+      const pendingSearchQueries = new Map<string, Array<{ prefix: string; query: string }>>();
 
       const pendingContent: string[] = [];
+
+      let lastSearchPrefix = "";
+      let lastSearchWasQuery = false;
+
+      const resetSearchPrefix = () => {
+        lastSearchPrefix = "";
+        lastSearchWasQuery = false;
+      };
+
+      const buildSearchHeader = (prefixLabel: string, isQuery: boolean) => {
+        if (!prefixLabel) {
+          lastSearchPrefix = "";
+          lastSearchWasQuery = isQuery;
+          return "";
+        }
+        if (isQuery) {
+          lastSearchPrefix = prefixLabel;
+          lastSearchWasQuery = true;
+          return `${prefixLabel}\n`;
+        }
+        const header = !lastSearchWasQuery || lastSearchPrefix !== prefixLabel ? `${prefixLabel}\n` : "";
+        lastSearchPrefix = prefixLabel;
+        lastSearchWasQuery = false;
+        return header;
+      };
+
+      const queueSearchQuery = (key: string, prefixLabel: string, query: string) => {
+        if (!key || !query) return;
+        const bucket = pendingSearchQueries.get(key) ?? [];
+        bucket.push({ prefix: prefixLabel, query });
+        pendingSearchQueries.set(key, bucket);
+      };
+
+      const popSearchQuery = (key: string) => {
+        const bucket = pendingSearchQueries.get(key);
+        if (!bucket || !bucket.length) return undefined;
+        const item = bucket.shift();
+        if (!bucket.length) pendingSearchQueries.delete(key);
+        return item;
+      };
 
       const flushPendingContent = () => {
         if (!pendingContent.length) return;
@@ -298,6 +339,7 @@ export function createOpenAiStreamFromGrokNdjson(
 
       const queueContent = (text: string) => {
         if (!text) return;
+        resetSearchPrefix();
         if (showSearch) {
           pendingContent.push(text);
           return;
@@ -472,15 +514,7 @@ export function createOpenAiStreamFromGrokNdjson(
                       const dedupeKey = `${stepRolloutId || stepToolUsageId}|${query}`;
                       if (seenSearchQueries.has(dedupeKey)) continue;
                       seenSearchQueries.add(dedupeKey);
-                      let msg = `${prefix}🔍 搜索: ${query}\n`;
-                      if (showThinking) {
-                        if (!thinkOpened) {
-                          msg = `<think>\n${msg}`;
-                          thinkOpened = true;
-                        }
-                      }
-                      completionText += msg;
-                      controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                      queueSearchQuery(dedupeKey, prefix, query);
                     }
                   }
 
@@ -491,7 +525,12 @@ export function createOpenAiStreamFromGrokNdjson(
                       if (!seenSearchResults.has(resultsKey)) {
                         seenSearchResults.add(resultsKey);
                         const list = formatSearchResults(results);
-                        let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                        const pending = popSearchQuery(dedupeKey);
+                        const headerPrefix = pending?.prefix ?? prefix;
+                        const queryText = pending?.query ?? "";
+                        let msg = "";
+                        if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                        msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                         if (list) msg += `${list}\n`;
                         if (showThinking) {
                           if (!thinkOpened) {
@@ -515,7 +554,12 @@ export function createOpenAiStreamFromGrokNdjson(
                     if (seenSearchResults.has(resultsKey)) continue;
                     seenSearchResults.add(resultsKey);
                     const list = formatSearchResults(results);
-                    let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                    const pending = popSearchQuery(dedupeKey);
+                    const headerPrefix = pending?.prefix ?? prefix;
+                    const queryText = pending?.query ?? "";
+                    let msg = "";
+                    if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                    msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                     if (list) msg += `${list}\n`;
                     if (showThinking) {
                       if (!thinkOpened) {
@@ -534,7 +578,12 @@ export function createOpenAiStreamFromGrokNdjson(
                       if (!seenSearchResults.has(resultsKey)) {
                         seenSearchResults.add(resultsKey);
                         const list = formatSearchResults(results);
-                        let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                        const pending = popSearchQuery(dedupeKey);
+                        const headerPrefix = pending?.prefix ?? prefix;
+                        const queryText = pending?.query ?? "";
+                        let msg = "";
+                        if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                        msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                         if (list) msg += `${list}\n`;
                         if (showThinking) {
                           if (!thinkOpened) {
@@ -550,93 +599,7 @@ export function createOpenAiStreamFromGrokNdjson(
                 }
               }
 
-              if (Array.isArray(modelResp.webSearchResults) || modelResp.webSearchResults?.results) {
-                const results = extractSearchResults(modelResp.webSearchResults);
-                if (results.length) {
-                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
-                  if (!seenSearchResults.has(resultsKey)) {
-                    seenSearchResults.add(resultsKey);
-                    const list = formatSearchResults(results);
-                    let msg = `📄 找到 ${results.length} 条结果\n`;
-                    if (list) msg += `${list}\n`;
-                    if (showThinking) {
-                      if (!thinkOpened) {
-                        msg = `<think>\n${msg}`;
-                        thinkOpened = true;
-                      }
-                    }
-                    completionText += msg;
-                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
-                  }
-                }
-              }
-
-              if (Array.isArray(modelResp.toolUsageResults)) {
-                for (const usage of modelResp.toolUsageResults) {
-                  if (!usage || typeof usage !== "object") continue;
-                  if (!(usage as any).webSearchResults) continue;
-                  const results = extractSearchResults((usage as any).webSearchResults);
-                  if (!results.length) continue;
-                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
-                  if (seenSearchResults.has(resultsKey)) continue;
-                  seenSearchResults.add(resultsKey);
-                  const list = formatSearchResults(results);
-                  let msg = `📄 找到 ${results.length} 条结果\n`;
-                  if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                    }
-                  }
-                  completionText += msg;
-                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
-                }
-              }
-
-              if (Array.isArray(modelResp.webSearchResults) || modelResp.webSearchResults?.results) {
-                const results = extractSearchResults(modelResp.webSearchResults);
-                if (results.length) {
-                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
-                  if (!seenSearchResults.has(resultsKey)) {
-                    seenSearchResults.add(resultsKey);
-                    const list = formatSearchResults(results);
-                    let msg = `📄 找到 ${results.length} 条结果\n`;
-                    if (list) msg += `${list}\n`;
-                    if (showThinking) {
-                      if (!thinkOpened) {
-                        msg = `<think>\n${msg}`;
-                        thinkOpened = true;
-                      }
-                    }
-                    completionText += msg;
-                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
-                  }
-                }
-              }
-
-              if (Array.isArray(modelResp.toolUsageResults)) {
-                for (const usage of modelResp.toolUsageResults) {
-                  if (!usage || typeof usage !== "object") continue;
-                  if (!(usage as any).webSearchResults) continue;
-                  const results = extractSearchResults((usage as any).webSearchResults);
-                  if (!results.length) continue;
-                  const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
-                  if (seenSearchResults.has(resultsKey)) continue;
-                  seenSearchResults.add(resultsKey);
-                  const list = formatSearchResults(results);
-                  let msg = `📄 找到 ${results.length} 条结果\n`;
-                  if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                    }
-                  }
-                  completionText += msg;
-                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
-                }
-              }
+              // Skip aggregated model-level webSearchResults/toolUsageResults to avoid duplicate summaries.
             }
 
             if (isImage) {
@@ -694,15 +657,7 @@ export function createOpenAiStreamFromGrokNdjson(
                     seenSearchQueries.add(dedupeKey);
                     let prefix = "";
                     if (rolloutId) prefix = `[${rolloutId}] `;
-                    let msg = `${prefix}🔍 搜索: ${query}\n`;
-                    if (showThinking) {
-                      if (!thinkOpened) {
-                        msg = `<think>\n${msg}`;
-                        thinkOpened = true;
-                      }
-                    }
-                    completionText += msg;
-                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                    queueSearchQuery(dedupeKey, prefix, query);
                   }
                 }
               }
@@ -720,7 +675,12 @@ export function createOpenAiStreamFromGrokNdjson(
                   let prefix = "";
                   if (rolloutId) prefix = `[${rolloutId}] `;
                   const list = formatSearchResults(results);
-                  let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                  const pending = popSearchQuery(resultsKey);
+                  const headerPrefix = pending?.prefix ?? prefix;
+                  const queryText = pending?.query ?? "";
+                  let msg = "";
+                  if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                  msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                   if (list) msg += `${list}\n`;
                   if (showThinking) {
                     if (!thinkOpened) {
@@ -746,7 +706,12 @@ export function createOpenAiStreamFromGrokNdjson(
                   let prefix = "";
                   if (rolloutId) prefix = `[${rolloutId}] `;
                   const list = formatSearchResults(results);
-                  let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+                  const pending = popSearchQuery(resultsKey);
+                  const headerPrefix = pending?.prefix ?? prefix;
+                  const queryText = pending?.query ?? "";
+                  let msg = "";
+                  if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                  msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                   if (list) msg += `${list}\n`;
                   if (showThinking) {
                     if (!thinkOpened) {
@@ -780,6 +745,11 @@ export function createOpenAiStreamFromGrokNdjson(
               content = `\n</think>\n${content}`;
               thinkOpened = false;
               if (isThinking) thinkingFinished = true;
+            }
+
+            if (showSearch && thinkOpened && !currentIsThinking) {
+              content = `\n</think>\n${content}`;
+              thinkOpened = false;
             }
 
             if (!shouldSkip) {
@@ -904,6 +874,44 @@ export async function parseOpenAiFromGrokNdjson(
     responseText += textPart;
   };
 
+  let lastSearchPrefix = "";
+  let lastSearchWasQuery = false;
+  const resetSearchPrefix = () => {
+    lastSearchPrefix = "";
+    lastSearchWasQuery = false;
+  };
+  const buildSearchHeader = (prefixLabel: string, isQuery: boolean) => {
+    if (!prefixLabel) {
+      lastSearchPrefix = "";
+      lastSearchWasQuery = isQuery;
+      return "";
+    }
+    if (isQuery) {
+      lastSearchPrefix = prefixLabel;
+      lastSearchWasQuery = true;
+      return `${prefixLabel}\n`;
+    }
+    const header = !lastSearchWasQuery || lastSearchPrefix !== prefixLabel ? `${prefixLabel}\n` : "";
+    lastSearchPrefix = prefixLabel;
+    lastSearchWasQuery = false;
+    return header;
+  };
+
+  const pendingSearchQueries = new Map<string, Array<{ prefix: string; query: string }>>();
+  const queueSearchQuery = (key: string, prefixLabel: string, query: string) => {
+    if (!key || !query) return;
+    const bucket = pendingSearchQueries.get(key) ?? [];
+    bucket.push({ prefix: prefixLabel, query });
+    pendingSearchQueries.set(key, bucket);
+  };
+  const popSearchQuery = (key: string) => {
+    const bucket = pendingSearchQueries.get(key);
+    if (!bucket || !bucket.length) return undefined;
+    const item = bucket.shift();
+    if (!bucket.length) pendingSearchQueries.delete(key);
+    return item;
+  };
+
   for (const line of lines) {
     let data: GrokNdjson;
     try {
@@ -965,14 +973,7 @@ export async function parseOpenAiFromGrokNdjson(
               seenSearchQueries.add(dedupeKey);
               let prefix = "";
               if (rolloutId) prefix = `[${rolloutId}] `;
-              let msg = `${prefix}🔍 搜索: ${query}\n`;
-              if (showThinking) {
-                if (!thinkOpened) {
-                  msg = `<think>\n${msg}`;
-                  thinkOpened = true;
-                }
-              }
-              appendSearchText(msg);
+              queueSearchQuery(dedupeKey, prefix, query);
             }
           }
         }
@@ -987,7 +988,12 @@ export async function parseOpenAiFromGrokNdjson(
             let prefix = "";
             if (rolloutId) prefix = `[${rolloutId}] `;
             const list = formatSearchResults(results);
-            let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+            const pending = popSearchQuery(resultsKey);
+            const headerPrefix = pending?.prefix ?? prefix;
+            const queryText = pending?.query ?? "";
+            let msg = "";
+            if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+            msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
             if (list) msg += `${list}\n`;
             if (showThinking) {
               if (!thinkOpened) {
@@ -1009,7 +1015,12 @@ export async function parseOpenAiFromGrokNdjson(
             let prefix = "";
             if (rolloutId) prefix = `[${rolloutId}] `;
             const list = formatSearchResults(results);
-            let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+            const pending = popSearchQuery(resultsKey);
+            const headerPrefix = pending?.prefix ?? prefix;
+            const queryText = pending?.query ?? "";
+            let msg = "";
+            if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+            msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
             if (list) msg += `${list}\n`;
             if (showThinking) {
               if (!thinkOpened) {
@@ -1023,7 +1034,7 @@ export async function parseOpenAiFromGrokNdjson(
         if (wasThinking && !currentIsThinking) thinkingFinished = true;
         isThinking = currentIsThinking;
       } else if (!filteredTags.some((t) => token.includes(t))) {
-        let tokenContent = token;
+            let tokenContent = token;
         if (messageTag === "header") tokenContent = `\n\n${token}\n\n`;
         let shouldSkip = false;
         if (currentIsThinking) {
@@ -1038,10 +1049,15 @@ export async function parseOpenAiFromGrokNdjson(
           thinkOpened = false;
           if (wasThinking) thinkingFinished = true;
         }
-        if (!shouldSkip) {
-          appendResponseText(tokenContent);
-          sawResponseToken = true;
-        }
+            if (showSearch && thinkOpened && !currentIsThinking) {
+              tokenContent = `\n</think>\n${tokenContent}`;
+              thinkOpened = false;
+            }
+            if (!shouldSkip) {
+              resetSearchPrefix();
+              appendResponseText(tokenContent);
+              sawResponseToken = true;
+            }
         isThinking = currentIsThinking;
       }
     }
@@ -1066,14 +1082,7 @@ export async function parseOpenAiFromGrokNdjson(
             const dedupeKey = `${stepRolloutId || stepToolUsageId}|${query}`;
             if (seenSearchQueries.has(dedupeKey)) continue;
             seenSearchQueries.add(dedupeKey);
-            let msg = `${prefix}🔍 搜索: ${query}\n`;
-            if (showThinking) {
-              if (!thinkOpened) {
-                msg = `<think>\n${msg}`;
-                thinkOpened = true;
-              }
-            }
-            appendSearchText(msg);
+            queueSearchQuery(dedupeKey, prefix, query);
           }
         }
 
@@ -1084,7 +1093,12 @@ export async function parseOpenAiFromGrokNdjson(
             if (!seenSearchResults.has(resultsKey)) {
               seenSearchResults.add(resultsKey);
               const list = formatSearchResults(results);
-              let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+              const pending = popSearchQuery(resultsKey);
+              const headerPrefix = pending?.prefix ?? prefix;
+              const queryText = pending?.query ?? "";
+              let msg = "";
+              if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+              msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
               if (list) msg += `${list}\n`;
               if (showThinking) {
                 if (!thinkOpened) {
@@ -1107,7 +1121,12 @@ export async function parseOpenAiFromGrokNdjson(
           if (seenSearchResults.has(resultsKey)) continue;
           seenSearchResults.add(resultsKey);
           const list = formatSearchResults(results);
-          let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+          const pending = popSearchQuery(resultsKey);
+          const headerPrefix = pending?.prefix ?? prefix;
+          const queryText = pending?.query ?? "";
+          let msg = "";
+          if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+          msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
           if (list) msg += `${list}\n`;
           if (showThinking) {
             if (!thinkOpened) {
@@ -1125,7 +1144,12 @@ export async function parseOpenAiFromGrokNdjson(
             if (!seenSearchResults.has(resultsKey)) {
               seenSearchResults.add(resultsKey);
               const list = formatSearchResults(results);
-              let msg = `${prefix}📄 找到 ${results.length} 条结果\n`;
+              const pending = popSearchQuery(resultsKey);
+              const headerPrefix = pending?.prefix ?? prefix;
+              const queryText = pending?.query ?? "";
+              let msg = "";
+              if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+              msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
               if (list) msg += `${list}\n`;
               if (showThinking) {
                 if (!thinkOpened) {
@@ -1140,47 +1164,7 @@ export async function parseOpenAiFromGrokNdjson(
       }
     }
 
-    if (showSearch && (Array.isArray(modelResp.webSearchResults) || modelResp.webSearchResults?.results)) {
-      const results = extractSearchResults(modelResp.webSearchResults);
-      if (results.length) {
-        const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
-        if (!seenSearchResults.has(resultsKey)) {
-          seenSearchResults.add(resultsKey);
-          const list = formatSearchResults(results);
-          let msg = `📄 找到 ${results.length} 条结果\n`;
-          if (list) msg += `${list}\n`;
-          if (showThinking) {
-            if (!thinkOpened) {
-              msg = `<think>\n${msg}`;
-              thinkOpened = true;
-            }
-          }
-          appendSearchText(msg);
-        }
-      }
-    }
-
-    if (showSearch && Array.isArray(modelResp.toolUsageResults)) {
-      for (const usage of modelResp.toolUsageResults) {
-        if (!usage || typeof usage !== "object") continue;
-        if (!(usage as any).webSearchResults) continue;
-        const results = extractSearchResults((usage as any).webSearchResults);
-        if (!results.length) continue;
-        const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
-        if (seenSearchResults.has(resultsKey)) continue;
-        seenSearchResults.add(resultsKey);
-        const list = formatSearchResults(results);
-        let msg = `📄 找到 ${results.length} 条结果\n`;
-        if (list) msg += `${list}\n`;
-        if (showThinking) {
-          if (!thinkOpened) {
-            msg = `<think>\n${msg}`;
-            thinkOpened = true;
-          }
-        }
-        appendSearchText(msg);
-      }
-    }
+    // Skip aggregated model-level webSearchResults/toolUsageResults to avoid duplicate summaries.
     if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
 
     if (typeof modelResp.model === "string" && modelResp.model) model = modelResp.model;
