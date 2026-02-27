@@ -525,7 +525,7 @@ export function createOpenAiStreamFromGrokNdjson(
                       if (!seenSearchResults.has(resultsKey)) {
                         seenSearchResults.add(resultsKey);
                         const list = formatSearchResults(results);
-                        const pending = popSearchQuery(dedupeKey);
+                        const pending = popSearchQuery(resultsKey);
                         const headerPrefix = pending?.prefix ?? prefix;
                         const queryText = pending?.query ?? "";
                         let msg = "";
@@ -554,7 +554,7 @@ export function createOpenAiStreamFromGrokNdjson(
                     if (seenSearchResults.has(resultsKey)) continue;
                     seenSearchResults.add(resultsKey);
                     const list = formatSearchResults(results);
-                    const pending = popSearchQuery(dedupeKey);
+                    const pending = popSearchQuery(resultsKey);
                     const headerPrefix = pending?.prefix ?? prefix;
                     const queryText = pending?.query ?? "";
                     let msg = "";
@@ -578,7 +578,7 @@ export function createOpenAiStreamFromGrokNdjson(
                       if (!seenSearchResults.has(resultsKey)) {
                         seenSearchResults.add(resultsKey);
                         const list = formatSearchResults(results);
-                        const pending = popSearchQuery(dedupeKey);
+                        const pending = popSearchQuery(resultsKey);
                         const headerPrefix = pending?.prefix ?? prefix;
                         const queryText = pending?.query ?? "";
                         let msg = "";
