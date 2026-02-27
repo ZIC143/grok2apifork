@@ -341,6 +341,8 @@ export function createOpenAiStreamFromGrokNdjson(
       const queueContent = (text: string) => {
         if (!text) return;
         resetSearchPrefix();
+        // If search opened a <think>, ensure it is closed BEFORE any normal content is buffered/emitted.
+        if (showSearch && thinkOpenedBySearch) closeSearchThink();
         if (showSearch) {
           pendingContent.push(text);
           return;
@@ -795,6 +797,8 @@ export function createOpenAiStreamFromGrokNdjson(
           }
         }
 
+        // If we buffered normal content while search had opened <think>, close it before flushing buffered content.
+        if (showSearch && thinkOpenedBySearch) closeSearchThink();
         flushPendingContent();
         if (showThinking && thinkOpened) {
           const closeChunk = "\n</think>\n";

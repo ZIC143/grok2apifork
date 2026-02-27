@@ -279,6 +279,16 @@ class StreamProcessor(BaseProcessor):
             return None
         return self._sse(text)
 
+    def _close_search_think_buffered(self) -> None:
+        close_chunk = self._close_search_think_into()
+        if not close_chunk:
+            return
+        if self.show_search:
+            # Ensure the close tag appears before any buffered normal output.
+            self._pending_output.append(close_chunk)
+            return
+        # Not buffering: will be emitted directly by caller when needed.
+
     def _queue_or_emit_immediate(self, text: str) -> Optional[str]:
         if not text:
             return None
@@ -559,12 +569,16 @@ class StreamProcessor(BaseProcessor):
                             out_token = f"\n</think>\n{out_token}"
                             self._think_opened = False
 
-                        if self.show_search and self._think_opened and self._think_opened_by_search:
+                        if self._think_opened and self._think_opened_by_search:
+                            # Close search-opened think before buffering/printing normal token content.
                             close_chunk = self._close_search_think_into()
                             if close_chunk:
-                                immediate = self._queue_or_emit_immediate(close_chunk)
-                                if immediate:
-                                    yield immediate
+                                if self.show_search:
+                                    self._pending_output.append(close_chunk)
+                                else:
+                                    immediate = self._queue_or_emit_immediate(close_chunk)
+                                    if immediate:
+                                        yield immediate
 
                         queued = self._queue_or_emit(out_token)
                         if queued:
