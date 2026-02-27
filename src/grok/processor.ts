@@ -901,6 +901,18 @@ export async function parseOpenAiFromGrokNdjson(
     responseText += textPart;
   };
 
+  const closeSearchThink = () => {
+    if (!showThinking || !thinkOpened || !thinkOpenedBySearch) return;
+    appendSearchText("\n</think>\n");
+    thinkOpened = false;
+    thinkOpenedBySearch = false;
+  };
+
+  const appendResponseTextSafely = (textPart: string) => {
+    if (showSearch && thinkOpenedBySearch) closeSearchThink();
+    appendResponseText(textPart);
+  };
+
   let lastSearchPrefix = "";
   let lastSearchWasQuery = false;
   const resetSearchPrefix = () => {
@@ -970,6 +982,7 @@ export async function parseOpenAiFromGrokNdjson(
         posterPreview: settings.video_poster_preview === true,
         ...(poster ? { posterUrl: poster } : {}),
       });
+      closeSearchThink();
       model = requestedModel;
       break;
     }
@@ -1083,13 +1096,11 @@ export async function parseOpenAiFromGrokNdjson(
           if (wasThinking) thinkingFinished = true;
         }
         if (showSearch && thinkOpenedBySearch && !currentIsThinking) {
-          appendSearchText("\n</think>\n");
-          thinkOpened = false;
-          thinkOpenedBySearch = false;
+          closeSearchThink();
         }
         if (!shouldSkip) {
           resetSearchPrefix();
-          appendResponseText(tokenContent);
+          appendResponseTextSafely(tokenContent);
           sawResponseToken = true;
         }
         isThinking = currentIsThinking;
@@ -1213,15 +1224,20 @@ export async function parseOpenAiFromGrokNdjson(
       for (const u of urls) {
         const imgPath = encodeAssetPath(u);
         const imgUrl = toImgProxyUrl(global, origin, imgPath);
-        appendResponseText(`\n![Generated Image](${imgUrl})`);
+        appendResponseTextSafely(`\n![Generated Image](${imgUrl})`);
       }
       break;
     }
 
     if (!sawResponseToken && typeof modelResp.message === "string") {
       if (showThinking && thinkOpened) {
-        appendSearchText("\n</think>\n");
+        if (thinkOpenedBySearch) {
+          appendSearchText("\n</think>\n");
+        } else {
+          appendResponseText("\n</think>\n");
+        }
         thinkOpened = false;
+        thinkOpenedBySearch = false;
       }
       responseText = modelResp.message;
     }
@@ -1234,8 +1250,13 @@ export async function parseOpenAiFromGrokNdjson(
   }
 
   if (showThinking && thinkOpened) {
-    appendResponseText("\n</think>\n");
+    if (thinkOpenedBySearch) {
+      appendSearchText("\n</think>\n");
+    } else {
+      appendResponseText("\n</think>\n");
+    }
     thinkOpened = false;
+    thinkOpenedBySearch = false;
   }
 
   const promptEst = estimateInputTokensFromMessages(opts.promptMessages ?? []);

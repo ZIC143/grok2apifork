@@ -264,6 +264,13 @@ class StreamProcessor(BaseProcessor):
             self._think_opened_by_search = True
         return output
 
+    def _close_search_think_into(self) -> str:
+        if not self.show_think or not self._think_opened or not self._think_opened_by_search:
+            return ""
+        self._think_opened = False
+        self._think_opened_by_search = False
+        return "\n</think>\n"
+
     def _queue_or_emit(self, text: str) -> Optional[str]:
         if not text:
             return None
@@ -271,6 +278,14 @@ class StreamProcessor(BaseProcessor):
             self._pending_output.append(text)
             return None
         return self._sse(text)
+
+    def _append_response_text_safely(self, response_text: str, text: str) -> str:
+        if not text:
+            return response_text
+        close_chunk = self._close_search_think_into()
+        if close_chunk:
+            response_text += close_chunk
+        return response_text + text
     
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """处理流式响应"""
@@ -805,12 +820,11 @@ class CollectProcessor(BaseProcessor):
                         continue
 
                     if self.show_search and self._think_opened and self._think_opened_by_search and not current_is_thinking:
-                        close_chunk = "\n</think>\n"
-                        queued = self._queue_or_emit(close_chunk)
-                        if queued:
-                            yield queued
-                        self._think_opened = False
-                        self._think_opened_by_search = False
+                        close_chunk = self._close_search_think_into()
+                        if close_chunk:
+                            queued = self._queue_or_emit(close_chunk)
+                            if queued:
+                                yield queued
 
                     out_token = token
                     if current_is_thinking:
@@ -827,7 +841,7 @@ class CollectProcessor(BaseProcessor):
                         if is_thinking:
                             thinking_finished = True
                     # search-initiated </think> is already handled above before正文
-                    response_text += out_token
+                    response_text = self._append_response_text_safely(response_text, out_token)
                     saw_response_token = True
                     is_thinking = current_is_thinking
 
@@ -924,7 +938,7 @@ class CollectProcessor(BaseProcessor):
                         if self.show_think and self._think_opened:
                             response_text += "\n</think>\n"
                             self._think_opened = False
-                        response_text = mr.get("message", "")
+                        response_text = self._append_response_text_safely(response_text, mr.get("message", ""))
                     
                     if urls := mr.get("generatedImageUrls"):
                         response_text += "\n"
@@ -953,9 +967,13 @@ class CollectProcessor(BaseProcessor):
             await self.close()
         
         if self.show_think and self._think_opened:
-            response_text += "\n</think>\n"
-            self._think_opened = False
-            self._think_opened_by_search = False
+            close_chunk = self._close_search_think_into()
+            if close_chunk:
+                search_text += close_chunk
+            else:
+                response_text += "\n</think>\n"
+                self._think_opened = False
+                self._think_opened_by_search = False
         content = f"{search_text}{response_text}"
         usage = build_chat_usage(prompt_messages or [], content)
         return {
