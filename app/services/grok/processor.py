@@ -194,35 +194,6 @@ class StreamProcessor(BaseProcessor):
             self._pending_search_queries.pop(key, None)
         return item
 
-    def _build_search_header(self, prefix: str, is_query: bool) -> str:
-        if not prefix:
-            self._last_search_prefix = ""
-            self._last_search_was_query = is_query
-            return ""
-        if is_query:
-            self._last_search_prefix = prefix
-            self._last_search_was_query = True
-            return f"{prefix}\n"
-        header = ""
-        if (not self._last_search_was_query) or (self._last_search_prefix != prefix):
-            header = f"{prefix}\n"
-        self._last_search_prefix = prefix
-        self._last_search_was_query = False
-        return header
-
-    def _queue_search_query(self, key: str, prefix: str, query: str) -> None:
-        if not key or not query:
-            return
-        self._pending_search_queries[key] = {
-            "prefix": prefix,
-            "query": query,
-        }
-
-    def _pop_search_query(self, key: str) -> Optional[dict[str, str]]:
-        if not key:
-            return None
-        return self._pending_search_queries.pop(key, None)
-
     def _format_search_results(self, results: list[dict]) -> str:
         if not results:
             return ""
@@ -357,7 +328,7 @@ class StreamProcessor(BaseProcessor):
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if not query:
                                         continue
-                                    key = f"{step_rollout or step_tool_id}|{query}"
+                                    key = step_rollout or step_tool_id or "global"
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
@@ -365,7 +336,7 @@ class StreamProcessor(BaseProcessor):
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
-                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                key = step_rollout or step_tool_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     list_md = self._format_search_results(results_list)
@@ -393,7 +364,7 @@ class StreamProcessor(BaseProcessor):
                                 results_list = self._extract_results_list(usage.get("webSearchResults"))
                                 if not results_list:
                                     continue
-                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                key = step_rollout or step_tool_id or "global"
                                 if key in self._search_results_seen:
                                     continue
                                 self._search_results_seen.add(key)
@@ -418,7 +389,7 @@ class StreamProcessor(BaseProcessor):
                             if "raw_function_result" in step_tags and step.get("webSearchResults"):
                                 results_list = self._extract_results_list(step.get("webSearchResults"))
                                 if results_list:
-                                    key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                    key = step_rollout or step_tool_id or "global"
                                     if key not in self._search_results_seen:
                                         self._search_results_seen.add(key)
                                         list_md = self._format_search_results(results_list)
@@ -498,7 +469,7 @@ class StreamProcessor(BaseProcessor):
                                 if tool_name.startswith("web_search"):
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if query:
-                                        key = f"{rollout_id or tool_usage_card_id}|{query}"
+                                        key = rollout_id or tool_usage_card_id or "global"
                                         if key not in self._search_query_seen:
                                             self._search_query_seen.add(key)
                                             prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -509,7 +480,7 @@ class StreamProcessor(BaseProcessor):
                         if self.show_search and message_tag == "raw_function_result":
                             results_list = self._extract_results_list(resp.get("webSearchResults"))
                             if results_list:
-                                key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                                key = rollout_id or tool_usage_card_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -533,7 +504,7 @@ class StreamProcessor(BaseProcessor):
                         if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
                             results_list = resp.get("webSearchResults").get("results") or []
                             if results_list:
-                                key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                                key = rollout_id or tool_usage_card_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -642,6 +613,42 @@ class CollectProcessor(BaseProcessor):
             return ""
         return url.replace(" ", "%20").replace(")", "%29")
 
+    def _build_search_header(self, prefix: str, is_query: bool) -> str:
+        if not prefix:
+            self._last_search_prefix = ""
+            self._last_search_was_query = is_query
+            return ""
+        if is_query:
+            self._last_search_prefix = prefix
+            self._last_search_was_query = True
+            return f"{prefix}\n"
+        header = ""
+        if (not self._last_search_was_query) or (self._last_search_prefix != prefix):
+            header = f"{prefix}\n"
+        self._last_search_prefix = prefix
+        self._last_search_was_query = False
+        return header
+
+    def _queue_search_query(self, key: str, prefix: str, query: str) -> None:
+        if not key or not query:
+            return
+        bucket = self._pending_search_queries.setdefault(key, [])
+        bucket.append({
+            "prefix": prefix,
+            "query": query,
+        })
+
+    def _pop_search_query(self, key: str) -> Optional[dict[str, str]]:
+        if not key:
+            return None
+        bucket = self._pending_search_queries.get(key)
+        if not bucket:
+            return None
+        item = bucket.pop(0)
+        if not bucket:
+            self._pending_search_queries.pop(key, None)
+        return item
+
     def _format_search_results(self, results: list[dict]) -> str:
         if not results:
             return ""
@@ -689,7 +696,7 @@ class CollectProcessor(BaseProcessor):
             self._think_opened_by_search = True
         return output
     
-    async def process(self, response: AsyncIterable[bytes], prompt_messages: Optional[list[dict]] = None) -> dict[str, Any]:
+    async def process(self, response: AsyncIterable[bytes], prompt_messages: Optional[list[dict]] = None):
         """处理并收集完整响应"""
         response_id = ""
         fingerprint = ""
@@ -747,7 +754,7 @@ class CollectProcessor(BaseProcessor):
                         elif isinstance(web_results, list):
                             results_list = web_results
                         if results_list:
-                            key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                            key = rollout_id or tool_usage_card_id or "global"
                             if key not in self._search_results_seen:
                                 self._search_results_seen.add(key)
                                 prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -772,7 +779,7 @@ class CollectProcessor(BaseProcessor):
                     if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
                         results_list = resp.get("webSearchResults").get("results") or []
                         if results_list:
-                            key = f"{rollout_id or tool_usage_card_id}|{len(results_list)}"
+                            key = rollout_id or tool_usage_card_id or "global"
                             if key not in self._search_results_seen:
                                 self._search_results_seen.add(key)
                                 prefix = f"[{rollout_id}] " if rollout_id else ""
@@ -797,6 +804,14 @@ class CollectProcessor(BaseProcessor):
                     if self.filter_tags and any(t in token for t in self.filter_tags):
                         continue
 
+                    if self.show_search and self._think_opened and self._think_opened_by_search and not current_is_thinking:
+                        close_chunk = "\n</think>\n"
+                        queued = self._queue_or_emit(close_chunk)
+                        if queued:
+                            yield queued
+                        self._think_opened = False
+                        self._think_opened_by_search = False
+
                     out_token = token
                     if current_is_thinking:
                         if self.show_think and not self._think_opened:
@@ -811,10 +826,7 @@ class CollectProcessor(BaseProcessor):
                         self._think_opened_by_search = False
                         if is_thinking:
                             thinking_finished = True
-                    if self.show_search and self._think_opened and self._think_opened_by_search and not current_is_thinking:
-                        out_token = f"\n</think>\n{out_token}"
-                        self._think_opened = False
-                        self._think_opened_by_search = False
+                    # search-initiated </think> is already handled above before正文
                     response_text += out_token
                     saw_response_token = True
                     is_thinking = current_is_thinking
@@ -838,7 +850,7 @@ class CollectProcessor(BaseProcessor):
                                     query = self._normalize_search_text(args.get("query"), 200)
                                     if not query:
                                         continue
-                                    key = f"{step_rollout or step_tool_id}|{query}"
+                                    key = step_rollout or step_tool_id or "global"
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
@@ -846,7 +858,7 @@ class CollectProcessor(BaseProcessor):
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
-                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                key = step_rollout or step_tool_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     list_md = self._format_search_results(results_list)
@@ -870,7 +882,7 @@ class CollectProcessor(BaseProcessor):
                                 results_list = self._extract_results_list(usage.get("webSearchResults"))
                                 if not results_list:
                                     continue
-                                key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                key = step_rollout or step_tool_id or "global"
                                 if key in self._search_results_seen:
                                     continue
                                 self._search_results_seen.add(key)
@@ -891,7 +903,7 @@ class CollectProcessor(BaseProcessor):
                             if "raw_function_result" in step_tags and step.get("webSearchResults"):
                                 results_list = self._extract_results_list(step.get("webSearchResults"))
                                 if results_list:
-                                    key = f"{step_rollout or step_tool_id}|{len(results_list)}"
+                                    key = step_rollout or step_tool_id or "global"
                                     if key not in self._search_results_seen:
                                         self._search_results_seen.add(key)
                                         list_md = self._format_search_results(results_list)
