@@ -132,6 +132,7 @@ class StreamProcessor(BaseProcessor):
         self._last_search_prefix: str = ""
         self._last_search_was_query: bool = False
         self._think_opened_by_search: bool = False
+        self._saw_stream_search: bool = False
 
         if think is None:
             self.show_think = get_config("grok.thinking", False)
@@ -340,7 +341,7 @@ class StreamProcessor(BaseProcessor):
                 
                 # modelResponse
                 if mr := resp.get("modelResponse"):
-                    if self.show_search:
+                    if self.show_search and not self._saw_stream_search:
                         steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
                         for step in steps:
                             if not isinstance(step, dict):
@@ -488,7 +489,6 @@ class StreamProcessor(BaseProcessor):
                     if token and isinstance(token, str):
                         current_is_thinking = bool(resp.get("isThinking"))
                         message_tag = resp.get("messageTag")
-                        is_summary = message_tag == "summary"
                         rollout_id = resp.get("rolloutId") or ""
                         tool_usage_card_id = resp.get("toolUsageCardId") or ""
 
@@ -514,6 +514,7 @@ class StreamProcessor(BaseProcessor):
                                 key = rollout_id or tool_usage_card_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
+                                    self._saw_stream_search = True
                                     prefix = f"[{rollout_id}] " if rollout_id else ""
                                     list_md = self._format_search_results(results_list)
                                     pending = self._pop_search_query(key)
@@ -538,6 +539,7 @@ class StreamProcessor(BaseProcessor):
                                 key = rollout_id or tool_usage_card_id or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
+                                    self._saw_stream_search = True
                                     prefix = f"[{rollout_id}] " if rollout_id else ""
                                     list_md = self._format_search_results(results_list)
                                     pending = self._pop_search_query(key)
@@ -555,7 +557,7 @@ class StreamProcessor(BaseProcessor):
                                         self._reasoning_text += out
                             continue
 
-                        if not is_summary and self.filter_tags and any(t in token for t in self.filter_tags):
+                        if self.filter_tags and any(t in token for t in self.filter_tags):
                             continue
 
                         # 推理包裹
@@ -584,14 +586,12 @@ class StreamProcessor(BaseProcessor):
                                     if immediate:
                                         yield immediate
 
-                        if is_summary:
-                            immediate = self._queue_or_emit_immediate(out_token)
-                            if immediate:
-                                yield immediate
+                        if current_is_thinking:
+                            queued = self._queue_or_emit_immediate(out_token)
                         else:
                             queued = self._queue_or_emit(out_token)
-                            if queued:
-                                yield queued
+                        if queued:
+                            yield queued
                         if self._think_opened and self.show_think:
                             self._reasoning_text += out_token
                         else:

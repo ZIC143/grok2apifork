@@ -282,6 +282,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkingFinished = false;
       let thinkOpened = false;
       let thinkOpenedBySearch = false;
+      let sawStreamSearchResults = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
       const seenSearchQueries = new Set<string>();
@@ -500,11 +501,10 @@ export function createOpenAiStreamFromGrokNdjson(
             const currentIsThinking = Boolean(grok.isThinking);
             const wasThinking = isThinking;
             const messageTag = grok.messageTag;
-            const isSummary = messageTag === "summary";
             const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
             const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
 
-            if (showSearch && grok.modelResponse) {
+            if (showSearch && grok.modelResponse && !sawStreamSearchResults) {
               const modelResp = grok.modelResponse;
               if (Array.isArray(modelResp.steps)) {
                 for (const step of modelResp.steps) {
@@ -655,7 +655,7 @@ export function createOpenAiStreamFromGrokNdjson(
             }
             let token = rawToken;
 
-            if (thinkingFinished && currentIsThinking && !isSummary) {
+            if (thinkingFinished && currentIsThinking) {
               isThinking = currentIsThinking;
               continue;
             }
@@ -688,6 +688,7 @@ export function createOpenAiStreamFromGrokNdjson(
                 const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
                 if (!seenSearchResults.has(resultsKey)) {
                   seenSearchResults.add(resultsKey);
+                  sawStreamSearchResults = true;
                   let prefix = "";
                   if (rolloutId) prefix = `[${rolloutId}] `;
                   const list = formatSearchResults(results);
@@ -721,6 +722,7 @@ export function createOpenAiStreamFromGrokNdjson(
                 const resultsKey = `${rolloutId || toolUsageCardId}|${results.length}`;
                 if (!seenSearchResults.has(resultsKey)) {
                   seenSearchResults.add(resultsKey);
+                  sawStreamSearchResults = true;
                   let prefix = "";
                   if (rolloutId) prefix = `[${rolloutId}] `;
                   const list = formatSearchResults(results);
@@ -748,12 +750,7 @@ export function createOpenAiStreamFromGrokNdjson(
               continue;
             }
 
-            if (!isSummary && filteredTags.some((t) => token.includes(t))) continue;
-
-            if (showSearch && thinkOpenedBySearch && !currentIsThinking) {
-              closeSearchThink();
-              flushPendingContent();
-            }
+            if (filteredTags.some((t) => token.includes(t))) continue;
 
             let content = token;
             if (messageTag === "header") content = `\n\n${token}\n\n`;
@@ -769,9 +766,8 @@ export function createOpenAiStreamFromGrokNdjson(
               }
             } else if (thinkOpened && showThinking) {
               if (thinkOpenedBySearch) {
-                content = `\n</think>\n${content}`;
-                thinkOpened = false;
-                thinkOpenedBySearch = false;
+                closeSearchThink();
+                flushPendingContent();
               } else {
                 content = `\n</think>\n${content}`;
                 thinkOpened = false;
@@ -779,21 +775,9 @@ export function createOpenAiStreamFromGrokNdjson(
               }
             }
 
-            if (showSearch && thinkOpened && thinkOpenedBySearch && !currentIsThinking) {
-              content = `\n</think>\n${content}`;
-              thinkOpened = false;
-              thinkOpenedBySearch = false;
-            }
-
             if (!shouldSkip) {
-              if (showSearch && thinkOpenedBySearch && !currentIsThinking) {
-                const closeChunk = "\n</think>\n";
-                completionText += closeChunk;
-                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, closeChunk)));
-                thinkOpened = false;
-                thinkOpenedBySearch = false;
-              }
-              if (isSummary) {
+              if (currentIsThinking) {
+                resetSearchPrefix();
                 completionText += content;
                 controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
               } else {
