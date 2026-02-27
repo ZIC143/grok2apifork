@@ -218,6 +218,8 @@ class StreamProcessor(BaseProcessor):
     def _extract_tool_usage(self, token_text: str) -> tuple[str, dict, str] | None:
         if not token_text:
             return None
+        if "<xai:" not in token_text:
+            return None
         id_match = re.search(r"<xai:tool_usage_card_id>([^<]+)</xai:tool_usage_card_id>", token_text)
         tool_usage_card_id = id_match.group(1) if id_match else ""
         tool_match = re.search(r"<xai:tool_name>([^<]+)</xai:tool_name>", token_text)
@@ -236,6 +238,8 @@ class StreamProcessor(BaseProcessor):
     def _extract_tool_usage_cards(self, token_text: Any) -> list[tuple[str, dict, str]]:
         text = str(token_text or "")
         if not text:
+            return []
+        if "<xai:" not in text:
             return []
         matches = re.findall(r"<xai:tool_usage_card>[\s\S]*?<\/xai:tool_usage_card>", text, flags=re.IGNORECASE)
         if matches:
@@ -309,6 +313,8 @@ class StreamProcessor(BaseProcessor):
     async def process(self, response: AsyncIterable[bytes]) -> AsyncGenerator[str, None]:
         """处理流式响应"""
         try:
+            show_search = self.show_search
+            show_think = self.show_think
             async for line in response:
                 if not line:
                     continue
@@ -344,7 +350,7 @@ class StreamProcessor(BaseProcessor):
                 
                 # modelResponse
                 if mr := resp.get("modelResponse"):
-                    if self.show_search and not self._saw_stream_search and not self._saw_response_token:
+                    if show_search and not self._saw_stream_search and not self._saw_response_token:
                         steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
                         for step in steps:
                             if not isinstance(step, dict):
@@ -391,7 +397,7 @@ class StreamProcessor(BaseProcessor):
                                     out = self._emit_search_text(msg, False)
                                     if out:
                                         yield self._sse(out)
-                                        if self.show_think:
+                                        if show_think:
                                             self._reasoning_text += out
                                         else:
                                             self._output_text += out
@@ -420,7 +426,7 @@ class StreamProcessor(BaseProcessor):
                                 out = self._emit_search_text(msg, False)
                                 if out:
                                     yield self._sse(out)
-                                    if self.show_think:
+                                    if show_think:
                                         self._reasoning_text += out
                                     else:
                                         self._output_text += out
@@ -444,21 +450,21 @@ class StreamProcessor(BaseProcessor):
                                         out = self._emit_search_text(msg, False)
                                         if out:
                                             yield self._sse(out)
-                                            if self.show_think:
+                                            if show_think:
                                                 self._reasoning_text += out
                                             else:
                                                 self._output_text += out
 
                         # Skip aggregated model-level webSearchResults/toolUsageResults to avoid duplicate summaries.
 
-                    if self.think_opened and self.show_think:
+                    if self.think_opened and show_think:
                         if msg := mr.get("message"):
                             yield self._sse(msg + "\n")
                             self._reasoning_text += msg + "\n"
                         yield self._sse("</think>\n")
                         self.think_opened = False
 
-                    if self.show_think and self._think_opened and isinstance(mr.get("message"), str) and mr.get("message"):
+                    if show_think and self._think_opened and isinstance(mr.get("message"), str) and mr.get("message"):
                         yield self._sse("\n</think>\n")
                         self._think_opened = False
                     
@@ -507,7 +513,7 @@ class StreamProcessor(BaseProcessor):
                         result_tool_id = web_results.get("toolUsageCardId") or tool_usage_card_id
 
                     # 搜索过程：函数结果（允许空 token）
-                    if self.show_search and message_tag == "raw_function_result":
+                    if show_search and message_tag == "raw_function_result":
                         if not self._saw_response_token:
                             results_list = self._extract_results_list(web_results)
                             if results_list:
@@ -533,7 +539,7 @@ class StreamProcessor(BaseProcessor):
                         continue
 
                     # 搜索过程：无 messageTag 但带结果（允许空 token）
-                    if self.show_search and has_web_results and (not isinstance(token, str) or not token):
+                    if show_search and has_web_results and (not isinstance(token, str) or not token):
                         if not self._saw_response_token:
                             results_list = self._extract_results_list(web_results)
                             if results_list:
@@ -561,7 +567,7 @@ class StreamProcessor(BaseProcessor):
                     if not isinstance(token, str) or not token:
                         continue
 
-                    if self.show_search and message_tag == "tool_usage_card":
+                    if show_search and message_tag == "tool_usage_card":
                         if not self._saw_response_token:
                             parsed = self._extract_tool_usage(token)
                             if parsed:
@@ -582,12 +588,12 @@ class StreamProcessor(BaseProcessor):
                     # 推理包裹
                     out_token = token
                     if current_is_thinking:
-                        if self.show_think and not self._think_opened:
+                        if show_think and not self._think_opened:
                             out_token = f"<think>\n{out_token}"
                             self._think_opened = True
-                        elif not self.show_think:
+                        elif not show_think:
                             continue
-                    elif self._think_opened and self.show_think:
+                    elif self._think_opened and show_think:
                         out_token = f"\n</think>\n{out_token}"
                         self._think_opened = False
 
@@ -612,7 +618,7 @@ class StreamProcessor(BaseProcessor):
                         queued = self._queue_or_emit(out_token)
                     if queued:
                         yield queued
-                    if self._think_opened and self.show_think:
+                    if self._think_opened and show_think:
                         self._reasoning_text += out_token
                     else:
                         self._output_text += out_token

@@ -3,6 +3,8 @@ import { buildChatUsageFromTexts, estimateInputTokensFromMessages, estimateToken
 
 type GrokNdjson = Record<string, unknown>;
 
+const sharedTextEncoder = new TextEncoder();
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -75,7 +77,7 @@ function buildVideoHtml(args: { videoUrl: string; posterUrl?: string; posterPrev
 }
 
 function base64UrlEncode(input: string): string {
-  const bytes = new TextEncoder().encode(input);
+  const bytes = sharedTextEncoder.encode(input);
   let binary = "";
   for (const b of bytes) binary += String.fromCharCode(b);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -187,6 +189,7 @@ function parseToolUsageCardToken(raw: string): {
 } | null {
   const token = String(raw || "");
   if (!token) return null;
+  if (!token.includes("<xai:")) return null;
   const idMatch = token.match(/<xai:tool_usage_card_id>([^<]+)<\/xai:tool_usage_card_id>/i);
   const toolUsageCardId = idMatch?.[1] ?? "";
   const toolMatch = token.match(/<xai:tool_name>([^<]+)<\/xai:tool_name>/i);
@@ -215,6 +218,7 @@ function extractToolUsageCardsFromText(
 ): Array<{ toolName: string; args: Record<string, unknown>; toolUsageCardId?: string }> {
   const text = String(raw ?? "");
   if (!text) return [];
+  if (!text.includes("<xai:")) return [];
   const matches = text.match(/<xai:tool_usage_card>[\s\S]*?<\/xai:tool_usage_card>/gi);
   if (matches && matches.length) {
     const parsed = matches.map((m) => parseToolUsageCardToken(m)).filter(Boolean) as Array<{
