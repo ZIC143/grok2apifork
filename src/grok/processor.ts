@@ -341,9 +341,7 @@ export function createOpenAiStreamFromGrokNdjson(
       const queueContent = (text: string) => {
         if (!text) return;
         resetSearchPrefix();
-        // If search opened a <think>, ensure it is closed BEFORE any normal content is buffered/emitted.
-        if (showSearch && thinkOpenedBySearch) closeSearchThink();
-        if (showSearch) {
+        if (showSearch && thinkOpenedBySearch) {
           pendingContent.push(text);
           return;
         }
@@ -751,7 +749,10 @@ export function createOpenAiStreamFromGrokNdjson(
 
             if (filteredTags.some((t) => token.includes(t))) continue;
 
-            if (showSearch && thinkOpenedBySearch) closeSearchThink();
+            if (showSearch && thinkOpenedBySearch) {
+              closeSearchThink();
+              flushPendingContent();
+            }
 
             let content = token;
             if (messageTag === "header") content = `\n\n${token}\n\n`;

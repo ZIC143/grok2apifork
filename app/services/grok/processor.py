@@ -274,7 +274,7 @@ class StreamProcessor(BaseProcessor):
     def _queue_or_emit(self, text: str) -> Optional[str]:
         if not text:
             return None
-        if self.show_search:
+        if self.show_search and self._think_opened_by_search:
             self._pending_output.append(text)
             return None
         return self._sse(text)
@@ -575,6 +575,9 @@ class StreamProcessor(BaseProcessor):
                             if close_chunk:
                                 if self.show_search:
                                     self._pending_output.append(close_chunk)
+                                    if self._pending_output:
+                                        yield self._sse("".join(self._pending_output))
+                                        self._pending_output.clear()
                                 else:
                                     immediate = self._queue_or_emit_immediate(close_chunk)
                                     if immediate:
