@@ -131,6 +131,7 @@ class StreamProcessor(BaseProcessor):
         self._pending_search_queries: dict[str, list[dict[str, str]]] = {}
         self._last_search_prefix: str = ""
         self._last_search_was_query: bool = False
+        self._think_opened_by_search: bool = False
 
         if think is None:
             self.show_think = get_config("grok.thinking", False)
@@ -289,6 +290,7 @@ class StreamProcessor(BaseProcessor):
         if not self._think_opened:
             output = f"<think>\n{output}"
             self._think_opened = True
+            self._think_opened_by_search = True
         return output
 
     def _queue_or_emit(self, text: str) -> Optional[str]:
@@ -619,6 +621,7 @@ class CollectProcessor(BaseProcessor):
         self._pending_search_queries: dict[str, list[dict[str, str]]] = {}
         self._last_search_prefix: str = ""
         self._last_search_was_query: bool = False
+        self._think_opened_by_search: bool = False
 
     def _normalize_search_text(self, value: Any, limit: int) -> str:
         text = " ".join(str(value or "").split()).strip()
@@ -683,6 +686,7 @@ class CollectProcessor(BaseProcessor):
         if not self._think_opened:
             output = f"<think>\n{output}"
             self._think_opened = True
+            self._think_opened_by_search = True
         return output
     
     async def process(self, response: AsyncIterable[bytes], prompt_messages: Optional[list[dict]] = None) -> dict[str, Any]:
@@ -798,16 +802,19 @@ class CollectProcessor(BaseProcessor):
                         if self.show_think and not self._think_opened:
                             out_token = f"<think>\n{out_token}"
                             self._think_opened = True
+                            self._think_opened_by_search = False
                         elif not self.show_think:
                             continue
                     elif self._think_opened and self.show_think:
                         out_token = f"\n</think>\n{out_token}"
                         self._think_opened = False
+                        self._think_opened_by_search = False
                         if is_thinking:
                             thinking_finished = True
-                    if self.show_search and self._think_opened and not current_is_thinking:
+                    if self.show_search and self._think_opened and self._think_opened_by_search and not current_is_thinking:
                         out_token = f"\n</think>\n{out_token}"
                         self._think_opened = False
+                        self._think_opened_by_search = False
                     response_text += out_token
                     saw_response_token = True
                     is_thinking = current_is_thinking
@@ -936,6 +943,7 @@ class CollectProcessor(BaseProcessor):
         if self.show_think and self._think_opened:
             response_text += "\n</think>\n"
             self._think_opened = False
+            self._think_opened_by_search = False
         content = f"{search_text}{response_text}"
         usage = build_chat_usage(prompt_messages or [], content)
         return {
@@ -1028,10 +1036,12 @@ class VideoStreamProcessor(BaseProcessor):
                             logger.info(f"Video generated: {video_url}")
                     continue
                         
-            if self.think_opened:
-                yield self._sse("</think>\n")
-            yield self._sse(finish="stop")
-            yield "data: [DONE]\n\n"
+            if self._think_opened:
+                queued = self._queue_or_emit("\n</think>\n")
+                if queued:
+                    yield queued
+                self._think_opened = False
+                self._think_opened_by_search = False
         except Exception as e:
             logger.error(f"Video stream processing error: {e}", extra={"model": self.model})
         finally:

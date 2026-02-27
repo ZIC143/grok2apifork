@@ -15,60 +15,73 @@ async function readWithTimeout(
   return Promise.race([
     reader.read(),
     sleep(ms).then(() => ({ timeout: true }) as const),
+  let thinkOpenedBySearch = false;
   ]);
 }
 
-function makeChunk(
-  id: string,
-  created: number,
-  model: string,
-  content: string,
-  finish_reason?: "stop" | "error" | null,
+            if (showThinking) {
+              if (!thinkOpened) {
+                msg = `<think>\n${msg}`;
+                thinkOpened = true;
+                thinkOpenedBySearch = true;
+              }
+            }
 ): string {
   const payload: Record<string, unknown> = {
     id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
+            if (showThinking) {
+              if (!thinkOpened) {
+                msg = `<think>\n${msg}`;
+                thinkOpened = true;
+                thinkOpenedBySearch = true;
+              }
+            }
         delta: content ? { role: "assistant", content } : {},
         finish_reason: finish_reason ?? null,
       },
-    ],
-  };
-  return `data: ${JSON.stringify(payload)}\n\n`;
-}
-
-function makeDone(): string {
+            if (showThinking) {
+              if (!thinkOpened) {
+                msg = `<think>\n${msg}`;
+                thinkOpened = true;
+                thinkOpenedBySearch = true;
+              }
+            }
   return "data: [DONE]\n\n";
 }
 
-function toImgProxyUrl(globalCfg: GlobalSettings, origin: string, path: string): string {
-  const baseUrl = (globalCfg.base_url ?? "").trim() || origin;
-  return `${baseUrl}/images/${path}`;
-}
-
-function buildVideoTag(src: string): string {
-  return `<video src="${src}" controls="controls" width="500" height="300"></video>\n`;
-}
-
-function buildVideoPosterPreview(videoUrl: string, posterUrl?: string): string {
-  const href = String(videoUrl || "").replace(/"/g, "&quot;");
-  const poster = String(posterUrl || "").replace(/"/g, "&quot;");
-  if (!href) return "";
-  if (!poster) return `<a href="${href}" target="_blank" rel="noopener noreferrer">${href}</a>\n`;
-  return `<a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;position:relative;max-width:100%;text-decoration:none;">
-  <img src="${poster}" alt="video" style="max-width:100%;height:auto;border-radius:12px;display:block;" />
-  <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
+            let shouldSkip = false;
+            if (currentIsThinking) {
+              if (!showThinking) {
+                shouldSkip = true;
+              } else if (!thinkOpened) {
+                tokenContent = `<think>\n${tokenContent}`;
+                thinkOpened = true;
+                thinkOpenedBySearch = false;
+              }
+            } else if (thinkOpened && showThinking) {
+              if (thinkOpenedBySearch) {
+                tokenContent = `\n</think>\n${tokenContent}`;
+                thinkOpened = false;
+                thinkOpenedBySearch = false;
+              } else {
+                tokenContent = `\n</think>\n${tokenContent}`;
+                thinkOpened = false;
+                if (wasThinking) thinkingFinished = true;
+              }
+            }
+            if (showSearch && thinkOpened && thinkOpenedBySearch && !currentIsThinking) {
+              tokenContent = `\n</think>\n${tokenContent}`;
+              thinkOpened = false;
+              thinkOpenedBySearch = false;
+            }
     <span style="width:64px;height:64px;border-radius:9999px;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;">
       <span style="width:0;height:0;border-top:12px solid transparent;border-bottom:12px solid transparent;border-left:18px solid #fff;margin-left:4px;"></span>
     </span>
-  </span>
-</a>\n`;
-}
-
+  if (showThinking && thinkOpened) {
+    appendResponseText("\n</think>\n");
+    thinkOpened = false;
+    thinkOpenedBySearch = false;
+  }
 function buildVideoHtml(args: { videoUrl: string; posterUrl?: string; posterPreview: boolean }): string {
   if (args.posterPreview) return buildVideoPosterPreview(args.videoUrl, args.posterUrl);
   return buildVideoTag(args.videoUrl);
@@ -281,6 +294,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let isThinking = false;
       let thinkingFinished = false;
       let thinkOpened = false;
+      let thinkOpenedBySearch = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
       const seenSearchQueries = new Set<string>();
@@ -536,6 +550,7 @@ export function createOpenAiStreamFromGrokNdjson(
                           if (!thinkOpened) {
                             msg = `<think>\n${msg}`;
                             thinkOpened = true;
+                            thinkOpenedBySearch = true;
                           }
                         }
                         completionText += msg;
@@ -565,6 +580,7 @@ export function createOpenAiStreamFromGrokNdjson(
                       if (!thinkOpened) {
                         msg = `<think>\n${msg}`;
                         thinkOpened = true;
+                        thinkOpenedBySearch = true;
                       }
                     }
                     completionText += msg;
@@ -589,6 +605,7 @@ export function createOpenAiStreamFromGrokNdjson(
                           if (!thinkOpened) {
                             msg = `<think>\n${msg}`;
                             thinkOpened = true;
+                            thinkOpenedBySearch = true;
                           }
                         }
                         completionText += msg;
@@ -682,12 +699,13 @@ export function createOpenAiStreamFromGrokNdjson(
                   if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
                   msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                   if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
+                    if (showThinking) {
+                      if (!thinkOpened) {
+                        msg = `<think>\n${msg}`;
+                        thinkOpened = true;
+                        thinkOpenedBySearch = true;
+                      }
                     }
-                  }
                   completionText += msg;
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
@@ -713,12 +731,13 @@ export function createOpenAiStreamFromGrokNdjson(
                   if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
                   msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                   if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                    }
-                  }
+                        if (showThinking) {
+                          if (!thinkOpened) {
+                            msg = `<think>\n${msg}`;
+                            thinkOpened = true;
+                            thinkOpenedBySearch = true;
+                          }
+                        }
                   completionText += msg;
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
@@ -740,16 +759,24 @@ export function createOpenAiStreamFromGrokNdjson(
               } else if (!thinkOpened) {
                 content = `<think>\n${content}`;
                 thinkOpened = true;
+                thinkOpenedBySearch = false;
               }
             } else if (thinkOpened && showThinking) {
-              content = `\n</think>\n${content}`;
-              thinkOpened = false;
-              if (isThinking) thinkingFinished = true;
+              if (thinkOpenedBySearch) {
+                content = `\n</think>\n${content}`;
+                thinkOpened = false;
+                thinkOpenedBySearch = false;
+              } else {
+                content = `\n</think>\n${content}`;
+                thinkOpened = false;
+                if (isThinking) thinkingFinished = true;
+              }
             }
 
-            if (showSearch && thinkOpened && !currentIsThinking) {
+            if (showSearch && thinkOpened && thinkOpenedBySearch && !currentIsThinking) {
               content = `\n</think>\n${content}`;
               thinkOpened = false;
+              thinkOpenedBySearch = false;
             }
 
             if (!shouldSkip) {
@@ -765,6 +792,7 @@ export function createOpenAiStreamFromGrokNdjson(
           completionText += closeChunk;
           controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, closeChunk)));
           thinkOpened = false;
+          thinkOpenedBySearch = false;
         }
 
         const usage = buildChatUsageFromTexts({
@@ -995,12 +1023,13 @@ export async function parseOpenAiFromGrokNdjson(
             if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
             msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
             if (list) msg += `${list}\n`;
-            if (showThinking) {
-              if (!thinkOpened) {
-                msg = `<think>\n${msg}`;
-                thinkOpened = true;
-              }
-            }
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                      thinkOpenedBySearch = true;
+                    }
+                  }
             appendSearchText(msg);
           }
         }
@@ -1022,12 +1051,13 @@ export async function parseOpenAiFromGrokNdjson(
             if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
             msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
             if (list) msg += `${list}\n`;
-            if (showThinking) {
-              if (!thinkOpened) {
-                msg = `<think>\n${msg}`;
-                thinkOpened = true;
-              }
-            }
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                      thinkOpenedBySearch = true;
+                    }
+                  }
             appendSearchText(msg);
           }
         }
@@ -1100,12 +1130,13 @@ export async function parseOpenAiFromGrokNdjson(
               if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
               msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
               if (list) msg += `${list}\n`;
-              if (showThinking) {
-                if (!thinkOpened) {
-                  msg = `<think>\n${msg}`;
-                  thinkOpened = true;
-                }
-              }
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                      thinkOpenedBySearch = true;
+                    }
+                  }
               appendSearchText(msg);
             }
           }
@@ -1128,12 +1159,13 @@ export async function parseOpenAiFromGrokNdjson(
           if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
           msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
           if (list) msg += `${list}\n`;
-          if (showThinking) {
-            if (!thinkOpened) {
-              msg = `<think>\n${msg}`;
-              thinkOpened = true;
-            }
-          }
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                      thinkOpenedBySearch = true;
+                    }
+                  }
           appendSearchText(msg);
         }
 
