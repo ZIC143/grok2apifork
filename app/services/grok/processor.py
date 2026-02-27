@@ -445,6 +445,10 @@ class StreamProcessor(BaseProcessor):
                             self._reasoning_text += msg + "\n"
                         yield self._sse("</think>\n")
                         self.think_opened = False
+
+                    if self.show_think and self._think_opened and isinstance(mr.get("message"), str) and mr.get("message"):
+                        yield self._sse("\n</think>\n")
+                        self._think_opened = False
                     
                     # 处理生成的图片
                     for url in mr.get("generatedImageUrls", []):
@@ -898,6 +902,9 @@ class CollectProcessor(BaseProcessor):
                                             search_text += out
                     response_id = mr.get("responseId", "")
                     if not saw_response_token and isinstance(mr.get("message"), str):
+                        if self.show_think and self._think_opened:
+                            response_text += "\n</think>\n"
+                            self._think_opened = False
                         response_text = mr.get("message", "")
                     
                     if urls := mr.get("generatedImageUrls"):

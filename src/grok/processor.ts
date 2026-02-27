@@ -1181,6 +1181,10 @@ export async function parseOpenAiFromGrokNdjson(
     }
 
     if (!sawResponseToken && typeof modelResp.message === "string") {
+      if (showThinking && thinkOpened) {
+        appendSearchText("\n</think>\n");
+        thinkOpened = false;
+      }
       responseText = modelResp.message;
     }
 
