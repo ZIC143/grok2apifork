@@ -133,6 +133,7 @@ class StreamProcessor(BaseProcessor):
         self._last_search_was_query: bool = False
         self._think_opened_by_search: bool = False
         self._saw_stream_search: bool = False
+        self._saw_response_token: bool = False
 
         if think is None:
             self.show_think = get_config("grok.thinking", False)
@@ -343,7 +344,7 @@ class StreamProcessor(BaseProcessor):
                 
                 # modelResponse
                 if mr := resp.get("modelResponse"):
-                    if self.show_search and not self._saw_stream_search:
+                    if self.show_search and not self._saw_stream_search and not self._saw_response_token:
                         steps = mr.get("steps") if isinstance(mr.get("steps"), list) else []
                         for step in steps:
                             if not isinstance(step, dict):
@@ -352,6 +353,8 @@ class StreamProcessor(BaseProcessor):
                             step_rollout = step.get("rolloutId") or ""
                             step_tool_id = step.get("toolUsageCardId") or ""
                             prefix = f"[{step_rollout}] " if step_rollout else ""
+                            step_card_id = step_tool_id
+                            base_search_key = step_tool_id or step_rollout or "global"
 
                             text_parts = step.get("text") if isinstance(step.get("text"), list) else []
                             for raw_text in text_parts:
@@ -365,11 +368,14 @@ class StreamProcessor(BaseProcessor):
                                     if key in self._search_query_seen:
                                         continue
                                     self._search_query_seen.add(key)
-                                    self._queue_search_query(key, prefix, query)
+                                    if card_id:
+                                        step_card_id = step_card_id or card_id
+                                    search_key = card_id or base_search_key
+                                    self._queue_search_query(search_key, prefix, query)
 
                             results_list = self._extract_results_list(step.get("webSearchResults"))
                             if results_list:
-                                key = step_rollout or step_tool_id or "global"
+                                key = step_card_id or step_rollout or "global"
                                 if key not in self._search_results_seen:
                                     self._search_results_seen.add(key)
                                     list_md = self._format_search_results(results_list)
@@ -397,7 +403,7 @@ class StreamProcessor(BaseProcessor):
                                 results_list = self._extract_results_list(usage.get("webSearchResults"))
                                 if not results_list:
                                     continue
-                                key = step_rollout or step_tool_id or "global"
+                                key = step_card_id or step_rollout or "global"
                                 if key in self._search_results_seen:
                                     continue
                                 self._search_results_seen.add(key)
@@ -422,7 +428,7 @@ class StreamProcessor(BaseProcessor):
                             if "raw_function_result" in step_tags and step.get("webSearchResults"):
                                 results_list = self._extract_results_list(step.get("webSearchResults"))
                                 if results_list:
-                                    key = step_rollout or step_tool_id or "global"
+                                    key = step_card_id or step_rollout or "global"
                                     if key not in self._search_results_seen:
                                         self._search_results_seen.add(key)
                                         list_md = self._format_search_results(results_list)
@@ -488,14 +494,75 @@ class StreamProcessor(BaseProcessor):
                 
                 # 普通 token
                 if (token := resp.get("token")) is not None:
-                    if token and isinstance(token, str):
-                        current_is_thinking = bool(resp.get("isThinking"))
-                        message_tag = resp.get("messageTag")
-                        rollout_id = resp.get("rolloutId") or ""
-                        tool_usage_card_id = resp.get("toolUsageCardId") or ""
+                    current_is_thinking = bool(resp.get("isThinking"))
+                    message_tag = resp.get("messageTag")
+                    rollout_id = resp.get("rolloutId") or ""
+                    tool_usage_card_id = resp.get("toolUsageCardId") or ""
+                    web_results = resp.get("webSearchResults")
+                    has_web_results = isinstance(web_results, list) or (
+                        isinstance(web_results, dict) and isinstance(web_results.get("results"), list)
+                    )
+                    result_tool_id = tool_usage_card_id
+                    if isinstance(web_results, dict) and isinstance(web_results.get("toolUsageCardId"), str):
+                        result_tool_id = web_results.get("toolUsageCardId") or tool_usage_card_id
 
-                        # 搜索过程：工具卡
-                        if self.show_search and message_tag == "tool_usage_card":
+                    # 搜索过程：函数结果（允许空 token）
+                    if self.show_search and message_tag == "raw_function_result":
+                        if not self._saw_response_token:
+                            results_list = self._extract_results_list(web_results)
+                            if results_list:
+                                key = result_tool_id or rollout_id or "global"
+                                if key not in self._search_results_seen:
+                                    self._search_results_seen.add(key)
+                                    self._saw_stream_search = True
+                                    prefix = f"[{rollout_id}] " if rollout_id else ""
+                                    list_md = self._format_search_results(results_list)
+                                    pending = self._pop_search_query(key)
+                                    header_prefix = pending.get("prefix") if pending else prefix
+                                    query_text = pending.get("query") if pending else ""
+                                    msg = ""
+                                    if query_text:
+                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
+                                    if list_md:
+                                        msg += f"{list_md}\n"
+                                    out = self._emit_search_text(msg, current_is_thinking)
+                                    if out:
+                                        yield self._sse(out)
+                                        self._reasoning_text += out
+                        continue
+
+                    # 搜索过程：无 messageTag 但带结果（允许空 token）
+                    if self.show_search and has_web_results and (not isinstance(token, str) or not token):
+                        if not self._saw_response_token:
+                            results_list = self._extract_results_list(web_results)
+                            if results_list:
+                                key = result_tool_id or rollout_id or "global"
+                                if key not in self._search_results_seen:
+                                    self._search_results_seen.add(key)
+                                    self._saw_stream_search = True
+                                    prefix = f"[{rollout_id}] " if rollout_id else ""
+                                    list_md = self._format_search_results(results_list)
+                                    pending = self._pop_search_query(key)
+                                    header_prefix = pending.get("prefix") if pending else prefix
+                                    query_text = pending.get("query") if pending else ""
+                                    msg = ""
+                                    if query_text:
+                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
+                                    if list_md:
+                                        msg += f"{list_md}\n"
+                                    out = self._emit_search_text(msg, current_is_thinking)
+                                    if out:
+                                        yield self._sse(out)
+                                        self._reasoning_text += out
+                        continue
+
+                    if not isinstance(token, str) or not token:
+                        continue
+
+                    if self.show_search and message_tag == "tool_usage_card":
+                        if not self._saw_response_token:
                             parsed = self._extract_tool_usage(token)
                             if parsed:
                                 tool_name, args, card_id = parsed
@@ -507,97 +574,48 @@ class StreamProcessor(BaseProcessor):
                                             self._search_query_seen.add(key)
                                             prefix = f"[{rollout_id}] " if rollout_id else ""
                                             self._queue_search_query(key, prefix, query)
+                        continue
+
+                    if self.filter_tags and any(t in token for t in self.filter_tags):
+                        continue
+
+                    # 推理包裹
+                    out_token = token
+                    if current_is_thinking:
+                        if self.show_think and not self._think_opened:
+                            out_token = f"<think>\n{out_token}"
+                            self._think_opened = True
+                        elif not self.show_think:
                             continue
+                    elif self._think_opened and self.show_think:
+                        out_token = f"\n</think>\n{out_token}"
+                        self._think_opened = False
 
-                        # 搜索过程：函数结果
-                        if self.show_search and message_tag == "raw_function_result":
-                            results_list = self._extract_results_list(resp.get("webSearchResults"))
-                            if results_list:
-                                key = tool_usage_card_id or rollout_id or "global"
-                                if key not in self._search_results_seen:
-                                    self._search_results_seen.add(key)
-                                    self._saw_stream_search = True
-                                    prefix = f"[{rollout_id}] " if rollout_id else ""
-                                    list_md = self._format_search_results(results_list)
-                                    pending = self._pop_search_query(key)
-                                    header_prefix = pending.get("prefix") if pending else prefix
-                                    query_text = pending.get("query") if pending else ""
-                                    msg = ""
-                                    if query_text:
-                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
-                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
-                                    if list_md:
-                                        msg += f"{list_md}\n"
-                                    out = self._emit_search_text(msg, current_is_thinking)
-                                    if out:
-                                        yield self._sse(out)
-                                        self._reasoning_text += out
-                            continue
+                    if self._think_opened and self._think_opened_by_search and not current_is_thinking:
+                        # Close search-opened think before buffering/printing normal token content.
+                        close_chunk = self._close_search_think_into()
+                        if close_chunk:
+                            if self.show_search:
+                                self._pending_output.append(close_chunk)
+                                if self._pending_output:
+                                    yield self._sse("".join(self._pending_output))
+                                    self._pending_output.clear()
+                            else:
+                                immediate = self._queue_or_emit_immediate(close_chunk)
+                                if immediate:
+                                    yield immediate
 
-                        # 搜索过程：无 messageTag 但带结果
-                        if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
-                            results_list = resp.get("webSearchResults").get("results") or []
-                            if results_list:
-                                key = tool_usage_card_id or rollout_id or "global"
-                                if key not in self._search_results_seen:
-                                    self._search_results_seen.add(key)
-                                    self._saw_stream_search = True
-                                    prefix = f"[{rollout_id}] " if rollout_id else ""
-                                    list_md = self._format_search_results(results_list)
-                                    pending = self._pop_search_query(key)
-                                    header_prefix = pending.get("prefix") if pending else prefix
-                                    query_text = pending.get("query") if pending else ""
-                                    msg = ""
-                                    if query_text:
-                                        msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
-                                    msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
-                                    if list_md:
-                                        msg += f"{list_md}\n"
-                                    out = self._emit_search_text(msg, current_is_thinking)
-                                    if out:
-                                        yield self._sse(out)
-                                        self._reasoning_text += out
-                            continue
-
-                        if self.filter_tags and any(t in token for t in self.filter_tags):
-                            continue
-
-                        # 推理包裹
-                        out_token = token
-                        if current_is_thinking:
-                            if self.show_think and not self._think_opened:
-                                out_token = f"<think>\n{out_token}"
-                                self._think_opened = True
-                            elif not self.show_think:
-                                continue
-                        elif self._think_opened and self.show_think:
-                            out_token = f"\n</think>\n{out_token}"
-                            self._think_opened = False
-
-                        if self._think_opened and self._think_opened_by_search and not current_is_thinking:
-                            # Close search-opened think before buffering/printing normal token content.
-                            close_chunk = self._close_search_think_into()
-                            if close_chunk:
-                                if self.show_search:
-                                    self._pending_output.append(close_chunk)
-                                    if self._pending_output:
-                                        yield self._sse("".join(self._pending_output))
-                                        self._pending_output.clear()
-                                else:
-                                    immediate = self._queue_or_emit_immediate(close_chunk)
-                                    if immediate:
-                                        yield immediate
-
-                        if current_is_thinking:
-                            queued = self._queue_or_emit_immediate(out_token)
-                        else:
-                            queued = self._queue_or_emit(out_token)
-                        if queued:
-                            yield queued
-                        if self._think_opened and self.show_think:
-                            self._reasoning_text += out_token
-                        else:
-                            self._output_text += out_token
+                    if current_is_thinking:
+                        queued = self._queue_or_emit_immediate(out_token)
+                    else:
+                        self._saw_response_token = True
+                        queued = self._queue_or_emit(out_token)
+                    if queued:
+                        yield queued
+                    if self._think_opened and self.show_think:
+                        self._reasoning_text += out_token
+                    else:
+                        self._output_text += out_token
                         
             if self.think_opened:
                 yield self._sse("</think>\n")
@@ -716,9 +734,11 @@ class CollectProcessor(BaseProcessor):
                 lines.append(self._escape_markdown(title))
         return "\n".join(lines)
 
-    def _extract_tool_usage(self, token_text: str) -> tuple[str, dict] | None:
+    def _extract_tool_usage(self, token_text: str) -> tuple[str, dict, str] | None:
         if not token_text:
             return None
+        id_match = re.search(r"<xai:tool_usage_card_id>([^<]+)</xai:tool_usage_card_id>", token_text)
+        tool_usage_card_id = id_match.group(1) if id_match else ""
         tool_match = re.search(r"<xai:tool_name>([^<]+)</xai:tool_name>", token_text)
         tool_name = tool_match.group(1) if tool_match else ""
         args_match = re.search(r"<!\[CDATA\[([\s\S]*?)\]\]>", token_text)
@@ -728,9 +748,9 @@ class CollectProcessor(BaseProcessor):
                 args = orjson.loads(args_match.group(1)) or {}
             except Exception:
                 args = {}
-        if not tool_name and not args:
+        if not tool_name and not args and not tool_usage_card_id:
             return None
-        return tool_name, args
+        return tool_name, args, tool_usage_card_id
 
     def _emit_search_text(self, text: str, current_is_thinking: bool) -> str:
         if not text:
@@ -768,13 +788,74 @@ class CollectProcessor(BaseProcessor):
                 if (llm := resp.get("llmInfo")) and not fingerprint:
                     fingerprint = llm.get("modelHash", "")
                 
-                if (token := resp.get("token")) is not None and isinstance(token, str):
+                if (token := resp.get("token")) is not None:
                     current_is_thinking = bool(resp.get("isThinking"))
                     message_tag = resp.get("messageTag")
                     rollout_id = resp.get("rolloutId") or ""
                     tool_usage_card_id = resp.get("toolUsageCardId") or ""
+                    web_results = resp.get("webSearchResults")
+                    has_web_results = isinstance(web_results, list) or (
+                        isinstance(web_results, dict) and isinstance(web_results.get("results"), list)
+                    )
+                    result_tool_id = tool_usage_card_id
+                    if isinstance(web_results, dict) and isinstance(web_results.get("toolUsageCardId"), str):
+                        result_tool_id = web_results.get("toolUsageCardId") or tool_usage_card_id
+
                     if thinking_finished and current_is_thinking:
                         is_thinking = current_is_thinking
+                        continue
+
+                    if self.show_search and message_tag == "raw_function_result":
+                        results_list = self._extract_results_list(web_results)
+                        if results_list:
+                            key = result_tool_id or rollout_id or "global"
+                            if key not in self._search_results_seen:
+                                self._search_results_seen.add(key)
+                                prefix = f"[{rollout_id}] " if rollout_id else ""
+                                list_md = self._format_search_results(results_list)
+                                pending = self._pop_search_query(key)
+                                header_prefix = pending.get("prefix") if pending else prefix
+                                query_text = pending.get("query") if pending else ""
+                                msg = ""
+                                if query_text:
+                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, current_is_thinking)
+                                if out:
+                                    search_text += out
+                        if is_thinking and not current_is_thinking:
+                            thinking_finished = True
+                        is_thinking = current_is_thinking
+                        continue
+
+                    if self.show_search and has_web_results and (not isinstance(token, str) or not token):
+                        results_list = self._extract_results_list(web_results)
+                        if results_list:
+                            key = result_tool_id or rollout_id or "global"
+                            if key not in self._search_results_seen:
+                                self._search_results_seen.add(key)
+                                prefix = f"[{rollout_id}] " if rollout_id else ""
+                                list_md = self._format_search_results(results_list)
+                                pending = self._pop_search_query(key)
+                                header_prefix = pending.get("prefix") if pending else prefix
+                                query_text = pending.get("query") if pending else ""
+                                msg = ""
+                                if query_text:
+                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
+                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
+                                if list_md:
+                                    msg += f"{list_md}\n"
+                                out = self._emit_search_text(msg, current_is_thinking)
+                                if out:
+                                    search_text += out
+                        if is_thinking and not current_is_thinking:
+                            thinking_finished = True
+                        is_thinking = current_is_thinking
+                        continue
+
+                    if not isinstance(token, str) or not token:
                         continue
 
                     if self.show_search and message_tag == "tool_usage_card":
@@ -784,66 +865,11 @@ class CollectProcessor(BaseProcessor):
                             if tool_name.startswith("web_search"):
                                 query = self._normalize_search_text(args.get("query"), 200)
                                 if query:
-                                    key = f"{card_id or tool_usage_card_id or rollout_id}|{query}"
+                                    key = card_id or tool_usage_card_id or rollout_id or "global"
                                     if key not in self._search_query_seen:
                                         self._search_query_seen.add(key)
                                         prefix = f"[{rollout_id}] " if rollout_id else ""
                                         self._queue_search_query(key, prefix, query)
-                        if is_thinking and not current_is_thinking:
-                            thinking_finished = True
-                        is_thinking = current_is_thinking
-                        continue
-
-                    if self.show_search and message_tag == "raw_function_result":
-                        web_results = resp.get("webSearchResults")
-                        results_list: list[dict] = []
-                        if isinstance(web_results, dict) and isinstance(web_results.get("results"), list):
-                            results_list = web_results.get("results") or []
-                        elif isinstance(web_results, list):
-                            results_list = web_results
-                        if results_list:
-                            key = tool_usage_card_id or rollout_id or "global"
-                            if key not in self._search_results_seen:
-                                self._search_results_seen.add(key)
-                                prefix = f"[{rollout_id}] " if rollout_id else ""
-                                list_md = self._format_search_results(results_list)
-                                pending = self._pop_search_query(key)
-                                header_prefix = pending.get("prefix") if pending else prefix
-                                query_text = pending.get("query") if pending else ""
-                                msg = ""
-                                if query_text:
-                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
-                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
-                                if list_md:
-                                    msg += f"{list_md}\n"
-                                out = self._emit_search_text(msg, current_is_thinking)
-                                if out:
-                                    search_text += out
-                        if is_thinking and not current_is_thinking:
-                            thinking_finished = True
-                        is_thinking = current_is_thinking
-                        continue
-
-                    if self.show_search and isinstance(resp.get("webSearchResults"), dict) and isinstance(resp.get("webSearchResults").get("results"), list):
-                        results_list = resp.get("webSearchResults").get("results") or []
-                        if results_list:
-                            key = tool_usage_card_id or rollout_id or "global"
-                            if key not in self._search_results_seen:
-                                self._search_results_seen.add(key)
-                                prefix = f"[{rollout_id}] " if rollout_id else ""
-                                list_md = self._format_search_results(results_list)
-                                pending = self._pop_search_query(key)
-                                header_prefix = pending.get("prefix") if pending else prefix
-                                query_text = pending.get("query") if pending else ""
-                                msg = ""
-                                if query_text:
-                                    msg += f"{self._build_search_header(header_prefix, True)}🔍 搜索: {query_text}\n"
-                                msg += f"{self._build_search_header(header_prefix, False)}📄 找到 {len(results_list)} 条结果\n"
-                                if list_md:
-                                    msg += f"{list_md}\n"
-                                out = self._emit_search_text(msg, current_is_thinking)
-                                if out:
-                                    search_text += out
                         if is_thinking and not current_is_thinking:
                             thinking_finished = True
                         is_thinking = current_is_thinking

@@ -292,6 +292,7 @@ export function createOpenAiStreamFromGrokNdjson(
       let thinkOpened = false;
       let thinkOpenedBySearch = false;
       let sawStreamSearchResults = false;
+      let sawResponseToken = false;
       let videoProgressStarted = false;
       let lastVideoProgress = -1;
       const seenSearchQueries = new Set<string>();
@@ -351,6 +352,7 @@ export function createOpenAiStreamFromGrokNdjson(
       const queueContent = (text: string) => {
         if (!text) return;
         resetSearchPrefix();
+        sawResponseToken = true;
         if (showSearch && thinkOpenedBySearch) {
           pendingContent.push(text);
           return;
@@ -512,8 +514,89 @@ export function createOpenAiStreamFromGrokNdjson(
             const messageTag = grok.messageTag;
             const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
             const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
+            const webSearchResults = grok.webSearchResults;
+            const hasWebSearchResults =
+              Array.isArray(webSearchResults) ||
+              (webSearchResults && Array.isArray((webSearchResults as any).results));
+            const resultToolUsageCardId =
+              toolUsageCardId ||
+              (webSearchResults && typeof (webSearchResults as any).toolUsageCardId === "string"
+                ? (webSearchResults as any).toolUsageCardId
+                : "");
 
-            if (showSearch && grok.modelResponse && !sawStreamSearchResults) {
+            if (showSearch && messageTag === "raw_function_result") {
+              if (!sawResponseToken) {
+                const results = extractSearchResults(webSearchResults);
+                if (results.length) {
+                  const resultKey = resultToolUsageCardId || rolloutId || "global";
+                  const resultsKey = `${resultKey}|${results.length}`;
+                  if (!seenSearchResults.has(resultsKey)) {
+                    seenSearchResults.add(resultsKey);
+                    sawStreamSearchResults = true;
+                    let prefix = "";
+                    if (rolloutId) prefix = `[${rolloutId}] `;
+                    const list = formatSearchResults(results);
+                    const pending = popSearchQuery(resultKey);
+                    const headerPrefix = pending?.prefix ?? prefix;
+                    const queryText = pending?.query ?? "";
+                    let msg = "";
+                    if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                    msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
+                    if (list) msg += `${list}\n`;
+                    if (showThinking) {
+                      if (!thinkOpened) {
+                        msg = `<think>\n${msg}`;
+                        thinkOpened = true;
+                        thinkOpenedBySearch = true;
+                      }
+                    }
+                    completionText += msg;
+                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                  }
+                }
+              }
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
+              continue;
+            }
+
+            if (showSearch && hasWebSearchResults && (typeof rawToken !== "string" || !rawToken)) {
+              if (!sawResponseToken) {
+                const results = extractSearchResults(webSearchResults);
+                if (results.length) {
+                  const resultKey = resultToolUsageCardId || rolloutId || "global";
+                  const resultsKey = `${resultKey}|${results.length}`;
+                  if (!seenSearchResults.has(resultsKey)) {
+                    seenSearchResults.add(resultsKey);
+                    sawStreamSearchResults = true;
+                    let prefix = "";
+                    if (rolloutId) prefix = `[${rolloutId}] `;
+                    const list = formatSearchResults(results);
+                    const pending = popSearchQuery(resultKey);
+                    const headerPrefix = pending?.prefix ?? prefix;
+                    const queryText = pending?.query ?? "";
+                    let msg = "";
+                    if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
+                    msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
+                    if (list) msg += `${list}\n`;
+                    if (showThinking) {
+                      if (!thinkOpened) {
+                        msg = `<think>\n${msg}`;
+                        thinkOpened = true;
+                        thinkOpenedBySearch = true;
+                      }
+                    }
+                    completionText += msg;
+                    controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
+                  }
+                }
+              }
+              if (wasThinking && !currentIsThinking) thinkingFinished = true;
+              isThinking = currentIsThinking;
+              continue;
+            }
+
+            if (showSearch && grok.modelResponse && !sawStreamSearchResults && !sawResponseToken) {
               const modelResp = grok.modelResponse;
               if (Array.isArray(modelResp.steps)) {
                 for (const step of modelResp.steps) {
@@ -523,7 +606,8 @@ export function createOpenAiStreamFromGrokNdjson(
                   const stepToolUsageId =
                     typeof (step as any).toolUsageCardId === "string" ? (step as any).toolUsageCardId : toolUsageCardId;
                   const prefix = stepRolloutId ? `[${stepRolloutId}] ` : "";
-                  const searchKey = stepRolloutId || stepToolUsageId || "global";
+                  let stepCardId = stepToolUsageId;
+                  const baseSearchKey = stepToolUsageId || stepRolloutId || "global";
 
                   const toolTextParts = Array.isArray((step as any).text) ? (step as any).text : [];
                   for (const rawText of toolTextParts) {
@@ -533,21 +617,24 @@ export function createOpenAiStreamFromGrokNdjson(
                       const query = normalizeSearchText((card.args as any)?.query, 200);
                       if (!query) continue;
                       const cardId = card.toolUsageCardId || stepToolUsageId || "";
-                      const dedupeKey = `${cardId || stepRolloutId || stepToolUsageId}|${query}`;
+                      if (cardId) stepCardId = stepCardId || cardId;
+                      const searchKey = cardId || baseSearchKey;
+                      const dedupeKey = `${searchKey}|${query}`;
                       if (seenSearchQueries.has(dedupeKey)) continue;
                       seenSearchQueries.add(dedupeKey);
-                      queueSearchQuery(cardId || searchKey, prefix, query);
+                      queueSearchQuery(searchKey, prefix, query);
                     }
                   }
 
                   if (Array.isArray((step as any).webSearchResults) || (step as any).webSearchResults?.results) {
                     const results = extractSearchResults((step as any).webSearchResults);
                     if (results.length) {
-                      const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+                      const stepSearchKey = stepCardId || stepRolloutId || "global";
+                      const resultsKey = `${stepSearchKey}|${results.length}`;
                       if (!seenSearchResults.has(resultsKey)) {
                         seenSearchResults.add(resultsKey);
                         const list = formatSearchResults(results);
-                        const pending = popSearchQuery(searchKey);
+                        const pending = popSearchQuery(stepSearchKey);
                         const headerPrefix = pending?.prefix ?? prefix;
                         const queryText = pending?.query ?? "";
                         let msg = "";
@@ -573,11 +660,12 @@ export function createOpenAiStreamFromGrokNdjson(
                     if (!(usage as any).webSearchResults) continue;
                     const results = extractSearchResults((usage as any).webSearchResults);
                     if (!results.length) continue;
-                    const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+                    const stepSearchKey = stepCardId || stepRolloutId || "global";
+                    const resultsKey = `${stepSearchKey}|${results.length}`;
                     if (seenSearchResults.has(resultsKey)) continue;
                     seenSearchResults.add(resultsKey);
                     const list = formatSearchResults(results);
-                    const pending = popSearchQuery(searchKey);
+                    const pending = popSearchQuery(stepSearchKey);
                     const headerPrefix = pending?.prefix ?? prefix;
                     const queryText = pending?.query ?? "";
                     let msg = "";
@@ -598,11 +686,12 @@ export function createOpenAiStreamFromGrokNdjson(
                   if (stepTags.includes("raw_function_result") && (step as any).webSearchResults) {
                     const results = extractSearchResults((step as any).webSearchResults);
                     if (results.length) {
-                      const resultsKey = `${stepRolloutId || stepToolUsageId}|${results.length}`;
+                      const stepSearchKey = stepCardId || stepRolloutId || "global";
+                      const resultsKey = `${stepSearchKey}|${results.length}`;
                       if (!seenSearchResults.has(resultsKey)) {
                         seenSearchResults.add(resultsKey);
                         const list = formatSearchResults(results);
-                        const pending = popSearchQuery(searchKey);
+                        const pending = popSearchQuery(stepSearchKey);
                         const headerPrefix = pending?.prefix ?? prefix;
                         const queryText = pending?.query ?? "";
                         let msg = "";
@@ -672,88 +761,22 @@ export function createOpenAiStreamFromGrokNdjson(
 
 
             if (showSearch && messageTag === "tool_usage_card") {
-              const parsed = parseToolUsageCardToken(token);
-              if (parsed && isWebSearchTool(parsed.toolName)) {
-                const queryRaw = (parsed.args as any)?.query;
-                const query = normalizeSearchText(queryRaw, 200);
-                if (query) {
-                  const cardId = parsed.toolUsageCardId || toolUsageCardId || "";
-                  const dedupeKey = `${cardId || rolloutId || toolUsageCardId}|${query}`;
-                  if (!seenSearchQueries.has(dedupeKey)) {
-                    seenSearchQueries.add(dedupeKey);
-                    let prefix = "";
-                    if (rolloutId) prefix = `[${rolloutId}] `;
-                    const searchKey = cardId || rolloutId || toolUsageCardId || "global";
-                    queueSearchQuery(searchKey, prefix, query);
-                  }
-                }
-              }
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
-              continue;
-            }
-
-            if (showSearch && messageTag === "raw_function_result") {
-              const results = extractSearchResults(grok.webSearchResults);
-              if (results.length) {
-                const resultsKey = `${toolUsageCardId || rolloutId}|${results.length}`;
-                if (!seenSearchResults.has(resultsKey)) {
-                  seenSearchResults.add(resultsKey);
-                  sawStreamSearchResults = true;
-                  let prefix = "";
-                  if (rolloutId) prefix = `[${rolloutId}] `;
-                  const list = formatSearchResults(results);
-                  const searchKey = toolUsageCardId || rolloutId || "global";
-                  const pending = popSearchQuery(searchKey);
-                  const headerPrefix = pending?.prefix ?? prefix;
-                  const queryText = pending?.query ?? "";
-                  let msg = "";
-                  if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
-                  msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
-                  if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                      thinkOpenedBySearch = true;
+              if (!sawResponseToken) {
+                const parsed = parseToolUsageCardToken(token);
+                if (parsed && isWebSearchTool(parsed.toolName)) {
+                  const queryRaw = (parsed.args as any)?.query;
+                  const query = normalizeSearchText(queryRaw, 200);
+                  if (query) {
+                    const cardId = parsed.toolUsageCardId || toolUsageCardId || "";
+                    const searchKey = cardId || toolUsageCardId || rolloutId || "global";
+                    const dedupeKey = `${searchKey}|${query}`;
+                    if (!seenSearchQueries.has(dedupeKey)) {
+                      seenSearchQueries.add(dedupeKey);
+                      let prefix = "";
+                      if (rolloutId) prefix = `[${rolloutId}] `;
+                      queueSearchQuery(searchKey, prefix, query);
                     }
                   }
-                  completionText += msg;
-                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
-                }
-              }
-              if (wasThinking && !currentIsThinking) thinkingFinished = true;
-              isThinking = currentIsThinking;
-              continue;
-            }
-
-            if (showSearch && grok.webSearchResults?.results && Array.isArray(grok.webSearchResults.results)) {
-              const results = extractSearchResults(grok.webSearchResults);
-              if (results.length) {
-                const resultsKey = `${toolUsageCardId || rolloutId}|${results.length}`;
-                if (!seenSearchResults.has(resultsKey)) {
-                  seenSearchResults.add(resultsKey);
-                  sawStreamSearchResults = true;
-                  let prefix = "";
-                  if (rolloutId) prefix = `[${rolloutId}] `;
-                  const list = formatSearchResults(results);
-                  const searchKey = toolUsageCardId || rolloutId || "global";
-                  const pending = popSearchQuery(searchKey);
-                  const headerPrefix = pending?.prefix ?? prefix;
-                  const queryText = pending?.query ?? "";
-                  let msg = "";
-                  if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
-                  msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
-                  if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                      thinkOpenedBySearch = true;
-                    }
-                  }
-                  completionText += msg;
-                  controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
               }
               if (wasThinking && !currentIsThinking) thinkingFinished = true;
