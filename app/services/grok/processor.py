@@ -488,6 +488,7 @@ class StreamProcessor(BaseProcessor):
                     if token and isinstance(token, str):
                         current_is_thinking = bool(resp.get("isThinking"))
                         message_tag = resp.get("messageTag")
+                        is_summary = message_tag == "summary"
                         rollout_id = resp.get("rolloutId") or ""
                         tool_usage_card_id = resp.get("toolUsageCardId") or ""
 
@@ -554,7 +555,7 @@ class StreamProcessor(BaseProcessor):
                                         self._reasoning_text += out
                             continue
 
-                        if self.filter_tags and any(t in token for t in self.filter_tags):
+                        if not is_summary and self.filter_tags and any(t in token for t in self.filter_tags):
                             continue
 
                         # 推理包裹
@@ -569,7 +570,7 @@ class StreamProcessor(BaseProcessor):
                             out_token = f"\n</think>\n{out_token}"
                             self._think_opened = False
 
-                        if self._think_opened and self._think_opened_by_search:
+                        if self._think_opened and self._think_opened_by_search and not current_is_thinking:
                             # Close search-opened think before buffering/printing normal token content.
                             close_chunk = self._close_search_think_into()
                             if close_chunk:
@@ -583,9 +584,14 @@ class StreamProcessor(BaseProcessor):
                                     if immediate:
                                         yield immediate
 
-                        queued = self._queue_or_emit(out_token)
-                        if queued:
-                            yield queued
+                        if is_summary:
+                            immediate = self._queue_or_emit_immediate(out_token)
+                            if immediate:
+                                yield immediate
+                        else:
+                            queued = self._queue_or_emit(out_token)
+                            if queued:
+                                yield queued
                         if self._think_opened and self.show_think:
                             self._reasoning_text += out_token
                         else:

@@ -500,6 +500,7 @@ export function createOpenAiStreamFromGrokNdjson(
             const currentIsThinking = Boolean(grok.isThinking);
             const wasThinking = isThinking;
             const messageTag = grok.messageTag;
+            const isSummary = messageTag === "summary";
             const rolloutId = typeof grok.rolloutId === "string" ? grok.rolloutId : "";
             const toolUsageCardId = typeof grok.toolUsageCardId === "string" ? grok.toolUsageCardId : "";
 
@@ -654,7 +655,7 @@ export function createOpenAiStreamFromGrokNdjson(
             }
             let token = rawToken;
 
-            if (thinkingFinished && currentIsThinking) {
+            if (thinkingFinished && currentIsThinking && !isSummary) {
               isThinking = currentIsThinking;
               continue;
             }
@@ -747,9 +748,9 @@ export function createOpenAiStreamFromGrokNdjson(
               continue;
             }
 
-            if (filteredTags.some((t) => token.includes(t))) continue;
+            if (!isSummary && filteredTags.some((t) => token.includes(t))) continue;
 
-            if (showSearch && thinkOpenedBySearch) {
+            if (showSearch && thinkOpenedBySearch && !currentIsThinking) {
               closeSearchThink();
               flushPendingContent();
             }
@@ -792,7 +793,12 @@ export function createOpenAiStreamFromGrokNdjson(
                 thinkOpened = false;
                 thinkOpenedBySearch = false;
               }
-              queueContent(content);
+              if (isSummary) {
+                completionText += content;
+                controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, content)));
+              } else {
+                queueContent(content);
+              }
             }
             isThinking = currentIsThinking;
           }
