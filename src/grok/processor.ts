@@ -15,73 +15,60 @@ async function readWithTimeout(
   return Promise.race([
     reader.read(),
     sleep(ms).then(() => ({ timeout: true }) as const),
-  let thinkOpenedBySearch = false;
   ]);
 }
 
-            if (showThinking) {
-              if (!thinkOpened) {
-                msg = `<think>\n${msg}`;
-                thinkOpened = true;
-                thinkOpenedBySearch = true;
-              }
-            }
+function makeChunk(
+  id: string,
+  created: number,
+  model: string,
+  content: string,
+  finish_reason?: "stop" | "error" | null,
 ): string {
   const payload: Record<string, unknown> = {
     id,
-            if (showThinking) {
-              if (!thinkOpened) {
-                msg = `<think>\n${msg}`;
-                thinkOpened = true;
-                thinkOpenedBySearch = true;
-              }
-            }
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
         delta: content ? { role: "assistant", content } : {},
         finish_reason: finish_reason ?? null,
       },
-            if (showThinking) {
-              if (!thinkOpened) {
-                msg = `<think>\n${msg}`;
-                thinkOpened = true;
-                thinkOpenedBySearch = true;
-              }
-            }
+    ],
+  };
+  return `data: ${JSON.stringify(payload)}\n\n`;
+}
+
+function makeDone(): string {
   return "data: [DONE]\n\n";
 }
 
-            let shouldSkip = false;
-            if (currentIsThinking) {
-              if (!showThinking) {
-                shouldSkip = true;
-              } else if (!thinkOpened) {
-                tokenContent = `<think>\n${tokenContent}`;
-                thinkOpened = true;
-                thinkOpenedBySearch = false;
-              }
-            } else if (thinkOpened && showThinking) {
-              if (thinkOpenedBySearch) {
-                tokenContent = `\n</think>\n${tokenContent}`;
-                thinkOpened = false;
-                thinkOpenedBySearch = false;
-              } else {
-                tokenContent = `\n</think>\n${tokenContent}`;
-                thinkOpened = false;
-                if (wasThinking) thinkingFinished = true;
-              }
-            }
-            if (showSearch && thinkOpened && thinkOpenedBySearch && !currentIsThinking) {
-              tokenContent = `\n</think>\n${tokenContent}`;
-              thinkOpened = false;
-              thinkOpenedBySearch = false;
-            }
+function toImgProxyUrl(globalCfg: GlobalSettings, origin: string, path: string): string {
+  const baseUrl = (globalCfg.base_url ?? "").trim() || origin;
+  return `${baseUrl}/images/${path}`;
+}
+
+function buildVideoTag(src: string): string {
+  return `<video src="${src}" controls="controls" width="500" height="300"></video>\n`;
+}
+
+function buildVideoPosterPreview(videoUrl: string, posterUrl?: string): string {
+  const href = String(videoUrl || "").replace(/"/g, "&quot;");
+  const poster = String(posterUrl || "").replace(/"/g, "&quot;");
+  if (!href) return "";
+  if (!poster) return `<a href="${href}" target="_blank" rel="noopener noreferrer">${href}</a>\n`;
+  return `<a href="${href}" target="_blank" rel="noopener noreferrer" style="display:inline-block;position:relative;max-width:100%;text-decoration:none;">
+  <img src="${poster}" alt="video" style="max-width:100%;height:auto;border-radius:12px;display:block;" />
+  <span style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;">
     <span style="width:64px;height:64px;border-radius:9999px;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;">
       <span style="width:0;height:0;border-top:12px solid transparent;border-bottom:12px solid transparent;border-left:18px solid #fff;margin-left:4px;"></span>
     </span>
-  if (showThinking && thinkOpened) {
-    appendResponseText("\n</think>\n");
-    thinkOpened = false;
-    thinkOpenedBySearch = false;
-  }
+  </span>
+</a>\n`;
+}
+
 function buildVideoHtml(args: { videoUrl: string; posterUrl?: string; posterPreview: boolean }): string {
   if (args.posterPreview) return buildVideoPosterPreview(args.videoUrl, args.posterUrl);
   return buildVideoTag(args.videoUrl);
@@ -158,7 +145,7 @@ function buildMarkdownLink(result: SearchResult): string {
   const previewRaw = normalizeSearchText(result.preview, SEARCH_PREVIEW_LIMIT);
   const preview = previewRaw ? escapeMarkdownText(previewRaw.replace(/"/g, "'")) : "";
   if (url) {
-    const suffix = preview ? ` \"${preview}\"` : "";
+    const suffix = preview ? ` "${preview}"` : "";
     return `[${title}](${url}${suffix})`;
   }
   return title ? `${title}` : "";
@@ -702,13 +689,13 @@ export function createOpenAiStreamFromGrokNdjson(
                   if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
                   msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                   if (list) msg += `${list}\n`;
-                    if (showThinking) {
-                      if (!thinkOpened) {
-                        msg = `<think>\n${msg}`;
-                        thinkOpened = true;
-                        thinkOpenedBySearch = true;
-                      }
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                      thinkOpenedBySearch = true;
                     }
+                  }
                   completionText += msg;
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
@@ -735,13 +722,13 @@ export function createOpenAiStreamFromGrokNdjson(
                   if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
                   msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
                   if (list) msg += `${list}\n`;
-                        if (showThinking) {
-                          if (!thinkOpened) {
-                            msg = `<think>\n${msg}`;
-                            thinkOpened = true;
-                            thinkOpenedBySearch = true;
-                          }
-                        }
+                  if (showThinking) {
+                    if (!thinkOpened) {
+                      msg = `<think>\n${msg}`;
+                      thinkOpened = true;
+                      thinkOpenedBySearch = true;
+                    }
+                  }
                   completionText += msg;
                   controller.enqueue(encoder.encode(makeChunk(id, created, currentModel, msg)));
                 }
@@ -901,7 +888,6 @@ export async function parseOpenAiFromGrokNdjson(
   let thinkOpened = false;
   let thinkingFinished = false;
   let thinkOpenedBySearch = false;
-  let thinkOpenedBySearch = false;
   const seenSearchQueries = new Set<string>();
   const seenSearchResults = new Set<string>();
 
@@ -1014,8 +1000,8 @@ export async function parseOpenAiFromGrokNdjson(
               seenSearchQueries.add(dedupeKey);
               let prefix = "";
               if (rolloutId) prefix = `[${rolloutId}] `;
-                    const searchKey = rolloutId || toolUsageCardId || "global";
-                    queueSearchQuery(searchKey, prefix, query);
+              const searchKey = rolloutId || toolUsageCardId || "global";
+              queueSearchQuery(searchKey, prefix, query);
             }
           }
         }
@@ -1030,8 +1016,8 @@ export async function parseOpenAiFromGrokNdjson(
             let prefix = "";
             if (rolloutId) prefix = `[${rolloutId}] `;
             const list = formatSearchResults(results);
-                  const searchKey = rolloutId || toolUsageCardId || "global";
-                  const pending = popSearchQuery(searchKey);
+            const searchKey = rolloutId || toolUsageCardId || "global";
+            const pending = popSearchQuery(searchKey);
             const headerPrefix = pending?.prefix ?? prefix;
             const queryText = pending?.query ?? "";
             let msg = "";
@@ -1059,55 +1045,55 @@ export async function parseOpenAiFromGrokNdjson(
             let prefix = "";
             if (rolloutId) prefix = `[${rolloutId}] `;
             const list = formatSearchResults(results);
-                  const searchKey = rolloutId || toolUsageCardId || "global";
-                  const pending = popSearchQuery(searchKey);
+            const searchKey = rolloutId || toolUsageCardId || "global";
+            const pending = popSearchQuery(searchKey);
             const headerPrefix = pending?.prefix ?? prefix;
             const queryText = pending?.query ?? "";
             let msg = "";
             if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
             msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
-              if (list) msg += `${list}\n`;
-              if (showThinking) {
-                if (!thinkOpened) {
-                  msg = `<think>\n${msg}`;
-                  thinkOpened = true;
-                  thinkOpenedBySearch = true;
-                }
+            if (list) msg += `${list}\n`;
+            if (showThinking) {
+              if (!thinkOpened) {
+                msg = `<think>\n${msg}`;
+                thinkOpened = true;
+                thinkOpenedBySearch = true;
               }
+            }
             appendSearchText(msg);
           }
         }
         if (wasThinking && !currentIsThinking) thinkingFinished = true;
         isThinking = currentIsThinking;
-        } else if (!filteredTags.some((t) => token.includes(t))) {
-          let tokenContent = token;
-          if (messageTag === "header") tokenContent = `\n\n${token}\n\n`;
-          let shouldSkip = false;
-          if (currentIsThinking) {
-            if (!showThinking) {
-              shouldSkip = true;
-            } else if (!thinkOpened) {
-              tokenContent = `<think>\n${tokenContent}`;
-              thinkOpened = true;
-              thinkOpenedBySearch = false;
-            }
-          } else if (thinkOpened && showThinking) {
-            tokenContent = `\n</think>\n${tokenContent}`;
-            thinkOpened = false;
-            if (wasThinking) thinkingFinished = true;
-          }
-          if (showSearch && thinkOpenedBySearch && !currentIsThinking) {
-            appendSearchText("\n</think>\n");
-            thinkOpened = false;
+      } else if (!filteredTags.some((t) => token.includes(t))) {
+        let tokenContent = token;
+        if (messageTag === "header") tokenContent = `\n\n${token}\n\n`;
+        let shouldSkip = false;
+        if (currentIsThinking) {
+          if (!showThinking) {
+            shouldSkip = true;
+          } else if (!thinkOpened) {
+            tokenContent = `<think>\n${tokenContent}`;
+            thinkOpened = true;
             thinkOpenedBySearch = false;
           }
-          if (!shouldSkip) {
-            resetSearchPrefix();
-            appendResponseText(tokenContent);
-            sawResponseToken = true;
-          }
-          isThinking = currentIsThinking;
+        } else if (thinkOpened && showThinking) {
+          tokenContent = `\n</think>\n${tokenContent}`;
+          thinkOpened = false;
+          if (wasThinking) thinkingFinished = true;
         }
+        if (showSearch && thinkOpenedBySearch && !currentIsThinking) {
+          appendSearchText("\n</think>\n");
+          thinkOpened = false;
+          thinkOpenedBySearch = false;
+        }
+        if (!shouldSkip) {
+          resetSearchPrefix();
+          appendResponseText(tokenContent);
+          sawResponseToken = true;
+        }
+        isThinking = currentIsThinking;
+      }
     }
 
     const modelResp = grok.modelResponse ?? result?.modelResponse;
@@ -1149,13 +1135,13 @@ export async function parseOpenAiFromGrokNdjson(
               if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
               msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
               if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                      thinkOpenedBySearch = true;
-                    }
-                  }
+              if (showThinking) {
+                if (!thinkOpened) {
+                  msg = `<think>\n${msg}`;
+                  thinkOpened = true;
+                  thinkOpenedBySearch = true;
+                }
+              }
               appendSearchText(msg);
             }
           }
@@ -1178,13 +1164,13 @@ export async function parseOpenAiFromGrokNdjson(
           if (queryText) msg += `${buildSearchHeader(headerPrefix, true)}🔍 搜索: ${queryText}\n`;
           msg += `${buildSearchHeader(headerPrefix, false)}📄 找到 ${results.length} 条结果\n`;
           if (list) msg += `${list}\n`;
-                  if (showThinking) {
-                    if (!thinkOpened) {
-                      msg = `<think>\n${msg}`;
-                      thinkOpened = true;
-                      thinkOpenedBySearch = true;
-                    }
-                  }
+          if (showThinking) {
+            if (!thinkOpened) {
+              msg = `<think>\n${msg}`;
+              thinkOpened = true;
+              thinkOpenedBySearch = true;
+            }
+          }
           appendSearchText(msg);
         }
 
@@ -1206,6 +1192,7 @@ export async function parseOpenAiFromGrokNdjson(
                 if (!thinkOpened) {
                   msg = `<think>\n${msg}`;
                   thinkOpened = true;
+                  thinkOpenedBySearch = true;
                 }
               }
               appendSearchText(msg);
